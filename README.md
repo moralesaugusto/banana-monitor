@@ -31,6 +31,20 @@ It does nothing unless you enable AI Mode in Settings, point its tool server at 
 - **Self-monitoring:** the platform watches its own health.
 - **Credentials:** stored encrypted in a separate database, never returned by the API.
 
+### The default agents
+
+A fresh install seeds five agents (AI Mode > Agents), each with its own prompt, tools and approval setting - see [Tajonaso](#tajonaso) above for the sixth.
+
+| Agent | Job | Changes hosts? |
+|---|---|---|
+| `discoverer` ("Master Discoverer") | Finds open ports on a host | Never |
+| `reviewer` | Identifies and records the services behind open ports; hands a finding off to `sinverguenza` when something looks inconsistent | Never |
+| `bellaco` | OS/hardware details, patch level, performance, failed services, full disks, pending reboots; recommendations per host | Only through `apply_updates`, and only after you approve each call |
+| `sinverguenza` | Security incidents and forensics: unauthorized access, malicious files, suspicious or persistent processes, tampered accounts or SSH keys, a cleared trail - builds a timeline and checks anything suspicious with VirusTotal if that tool is enabled | Never |
+| `reporter` | Turns `bellaco`'s and `sinverguenza`'s findings into a network/services report | Never |
+
+They only talk through the pub/sub bus (see above), not by calling each other directly, and every agent can be run, edited or disabled on its own from the Agents page.
+
 ## Use cases
 
 - **Know what is broken, fast.** The dashboard shows a health score, a 24 hour trend and a short "needs attention" list, so a glance tells you whether the NAS, the hypervisor or the DNS server is the problem.
