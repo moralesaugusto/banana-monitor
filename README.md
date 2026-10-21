@@ -13,6 +13,7 @@ It runs as a single Python process with SQLite storage, so there is no Docker, n
 - **Alerting:** threshold, staleness and flap-dampened alert rules, with an event timeline.
 - **Metrics:** history with automatic rollups and a size-bounded retention policy.
 - **AI Mode:** a small team of local-LLM agents (Ollama) that discover and double-check services, inspect hosts for health, update and security problems (Bellaco, Sinverguenza), with a message bus, human approval gates and full run traces. One agent, Tajonaso, is different from the rest - see the warning below.
+- **Agent bus visibility:** agents run one `asyncio` task each and talk only through a pub/sub message bus (dot-separated topics, `*`/`#` wildcard subscriptions) - never by calling each other directly. The UI shows the live routing table, per-topic message log, queue depth and per-agent state, and a workflow canvas of who publishes to whom, so a run stays inspectable rather than a black box.
 - **Reports:** network and services reports, built without a model or written by a reporter agent, downloadable as PDF.
 - **Telegram:** talk to the assistant, get `/status` and PDF reports, and receive alerts in a chat.
 - **Self-monitoring:** the platform watches its own health.
