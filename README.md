@@ -33,7 +33,7 @@ It does nothing unless you enable AI Mode in Settings, point its tool server at 
 
 ### The default agents
 
-A fresh install seeds five agents (AI Mode > Agents), each with its own prompt, tools and approval setting - see [Tajonaso](#tajonaso) above for the sixth.
+A fresh install seeds five agents (AI Mode > Agents), each with its own model, prompt, tools and approval setting - see [Tajonaso](#tajonaso) above for the sixth.
 
 | Agent | Job | Changes hosts? |
 |---|---|---|
