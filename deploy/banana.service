@@ -1,0 +1,29 @@
+[Unit]
+Description=Banana
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=banana
+Group=banana
+WorkingDirectory=/opt/banana/backend
+EnvironmentFile=/opt/banana/banana.env
+LoadCredential=master_key:/opt/banana/secrets/master_key
+Environment=BANANA_MASTER_KEY_FILE=%d/master_key
+# Runs via `python -m app.main` (not the bare `uvicorn` CLI) so it picks up
+# BANANA_HOST/BANANA_PORT from the env file and, when BANANA_HTTPS_ENABLED=true,
+# auto-generates a self-signed cert under BANANA_CERT_DIR on first start - see
+# backend/app/tls.py and the repository's .env.example.
+ExecStart=/opt/banana/backend/.venv/bin/python -m app.main
+Restart=on-failure
+RestartSec=5
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ReadWritePaths=/opt/banana/backend/data /opt/banana/backend/certificates
+ProtectHome=true
+
+[Install]
+WantedBy=multi-user.target

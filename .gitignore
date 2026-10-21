@@ -1,0 +1,35 @@
+# Python
+backend/.venv/
+backend/__pycache__/
+**/__pycache__/
+*.pyc
+backend/.mypy_cache/
+backend/.ruff_cache/
+backend/.pytest_cache/
+*.egg-info/
+
+# Data / secrets
+backend/data/
+*.db
+*.db-wal
+*.db-shm
+.env
+.env.*
+!.env.example
+backend/certificates/
+
+# Frontend
+frontend/node_modules/
+frontend/dist/
+frontend/.vite/
+
+# OS / editor
+.DS_Store
+backend/*.log
+
+# Local data backups (contain the master key)
+backend/data.bak*/
+
+# Local assistant settings
+.claude/settings.local.json
+backend/secrets/
