@@ -2,7 +2,7 @@
 
 **B**uilt-in **A**lerting for **N**etworks, **A**ppliances, **N**odes and **A**pps.
 
-Banana is a self-hosted monitoring platform for a home LAN. It answers one question at a glance: **what is broken right now, and why?** Optionally, a small team of local-LLM agents can investigate for you, coordinating over a transparent pub/sub message bus you can watch run in real time, topic by topic.
+Banana is a self-hosted monitoring platform for a home LAN. It answers one question at a glance: **what is broken right now, and why?** Optionally, a small team of local-LLM agents can investigate further, write up what they find as a report, and propose fixes for your approval - coordinating over a transparent pub/sub message bus you can watch run in real time, topic by topic.
 
 It runs as a single Python process with SQLite storage, so there is no Docker, no database server and no message queue to operate.
 
