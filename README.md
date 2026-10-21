@@ -2,13 +2,13 @@
 
 **B**uilt-in **A**lerting for **N**etworks, **A**ppliances, **N**odes and **A**pps.
 
-Banana is a self-hosted monitoring platform for a home LAN. It answers one question at a glance: **what is broken right now, and why?and what is really exploitable based on existing out-of-the-box cybersecurity capabilities.** Optionally, a small team of local-LLM agents can investigate further, write up what they find as a report, and propose fixes for your approval - coordinating over a transparent pub/sub message bus you can watch run in real time, topic by topic.
+Banana is a self-hosted monitoring platform for a home LAN. It answers one question at a glance: **what is broken right now, and why? and what is exploitable based on existing out-of-the-box cybersecurity capabilities.** Optionally, a small team of local-LLM agents can investigate further, write up what they find as a report, and propose fixes for your approval - coordinating over a transparent pub/sub message bus you can watch run in real time, topic by topic.
 
 It runs as a single Python process with SQLite storage, so there is no Docker, no database server and no message queue to operate.
 
 ## Security
 
-Banana is designed for a trusted LAN. The dashboard needs a login (first sign-in `admin` / `admin`, changed immediately) and is served over TLS 1.3 only, with an elliptic-curve certificate, AES-256-GCM and a hybrid post-quantum key exchange where the client supports it. Keep it bound to `127.0.0.1` (the default in `.env.example`) or behind a firewall. Do not expose it to the internet.
+Banana is designed for a trusted LAN. The dashboard needs a login (first sign-in `admin` / `admin`, changed immediately) and is served over TLS 1.3 only, with an elliptic-curve certificate, AES-256-GCM and a hybrid post-quantum key exchange where the client supports it. Keep it bound to `127.0.0.1` (the default in `.env.example`) or behind a firewall. 
 
 Configuration that is secret or environment-specific lives in `.env` (see `.env.example`) or in the UI, never in the repository. The `.gitignore` excludes `.env`, databases, certificates and the master key.
 
