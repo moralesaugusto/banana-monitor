@@ -2,7 +2,7 @@
 
 **B**uilt-in **A**lerting for **N**etworks, **A**ppliances, **N**odes and **A**pps.
 
-Banana is a self-hosted monitoring platform for a home LAN. It answers one question at a glance: **what is broken right now, and why?**
+Banana is a self-hosted monitoring platform for a home LAN. It answers one question at a glance: **what is broken right now, and why?** Optionally, a small team of local-LLM agents can investigate for you, coordinating over a transparent pub/sub message bus you can watch run in real time, topic by topic.
 
 It runs as a single Python process with SQLite storage, so there is no Docker, no database server and no message queue to operate.
 
@@ -12,8 +12,8 @@ It runs as a single Python process with SQLite storage, so there is no Docker, n
 - **Discovery:** scans your networks (ARP, ping, ports, nmap fingerprinting) and puts what it finds in a review queue before anything is monitored.
 - **Alerting:** threshold, staleness and flap-dampened alert rules, with an event timeline.
 - **Metrics:** history with automatic rollups and a size-bounded retention policy.
-- **AI Mode:** a small team of local-LLM agents (Ollama) that discover and double-check services, inspect hosts for health, update and security problems (Bellaco, Sinverguenza), with a message bus, human approval gates and full run traces. One agent, Tajonaso, is different from the rest - see the warning below.
-- **Agent bus visibility:** agents run one `asyncio` task each and talk only through a pub/sub message bus (dot-separated topics, `*`/`#` wildcard subscriptions) - never by calling each other directly. The UI shows the live routing table, per-topic message log, queue depth and per-agent state, and a workflow canvas of who publishes to whom, so a run stays inspectable rather than a black box.
+- **AI Mode:** a small team of local-LLM agents (Ollama) that discover and double-check services, inspect hosts for health, update and security problems (Bellaco, Sinverguenza), with human approval gates and full run traces. One agent, Tajonaso, is different from the rest - see the warning below.
+- **Transparent agent bus:** agents run concurrently, one `asyncio` task each, and only talk through a pub/sub message bus (dot-separated topics, `*`/`#` wildcard subscriptions) - never by calling each other directly. The UI shows the live routing table, per-topic message log, queue depth and per-agent state, and a workflow canvas of who publishes to whom, so a multi-agent run stays inspectable rather than a black box.
 - **Reports:** network and services reports, built without a model or written by a reporter agent, downloadable as PDF.
 - **Telegram:** talk to the assistant, get `/status` and PDF reports, and receive alerts in a chat.
 - **Self-monitoring:** the platform watches its own health.
@@ -26,9 +26,9 @@ It runs as a single Python process with SQLite storage, so there is no Docker, n
 - **Inventory a network you have lost track of.** Scan a subnet, review each new host in a queue, and only approve the ones you want monitored. The network map shows what runs where.
 - **Monitor a homelab stack in one place.** Proxmox nodes, VMs and containers, Linux and Windows hosts, AdGuard Home, Homebridge, Omada gear, plus plain HTTP, TCP, DNS and DHCP checks.
 - **Get a second opinion on odd hosts.** Optional local-LLM agents (Ollama, nothing leaves your LAN) inspect hosts read-only for failed logins, pending updates and slow services, and ask for your approval before anything changes.
+- **Watch a multi-agent run instead of trusting its summary.** Agents run concurrently and only talk through a pub/sub bus, so the UI can show you, live and topic by topic, which agent published what, who picked it up, and how long it queued - not just a final answer.
 - **Share a status report.** Generate a network and services report as a PDF, or ask the Telegram bot for `/status` from your phone.
 - **Run it without an ops project.** One Python process and SQLite: no Docker, no database server, no queue.
-- **See why a multi-agent run did what it did.** Each agent runs independently and only talks through the pub/sub bus, so you can watch, topic by topic, which agent published what, who picked it up, and how long it sat in a queue - instead of guessing from a final answer.
 
 ## Screenshots
 
