@@ -37,7 +37,7 @@ It does nothing unless you enable AI Mode in Settings, point its tool server at 
 - **Find out about outages before your family does.** Alert rules fire on thresholds (disk, CPU, latency), on stale data (a host that stopped reporting) and on flapping services, and can be pushed to Telegram.
 - **Inventory a network you have lost track of.** Scan a subnet, review each new host in a queue, and only approve the ones you want monitored. The network map shows what runs where.
 - **Monitor a homelab stack in one place.** Proxmox nodes, VMs and containers, Linux and Windows hosts, AdGuard Home, Homebridge, Omada gear, plus plain HTTP, TCP, DNS and DHCP checks.
-- **Get a second opinion on odd hosts.** Optional local-LLM agents (Ollama, nothing leaves your LAN) inspect hosts read-only for failed logins, pending updates and slow services, and ask for your approval before anything changes.
+- **Catch security drift before it's a problem.** Optional local-LLM agents (Ollama, nothing leaves your LAN) inspect hosts read-only for pending updates, failed login attempts, suspicious or persistent processes, slow services, and tampered accounts or SSH keys, then write it up as a finding - nothing changes without your approval.
 - **Watch a multi-agent run instead of trusting its summary.** Agents run concurrently and only talk through a pub/sub bus, so the UI can show you, live and topic by topic, which agent published what, who picked it up, and how long it queued - not just a final answer.
 - **Share a status report.** Generate a network and services report as a PDF, or ask the Telegram bot for `/status` from your phone.
 - **Run it without an ops project.** One Python process and SQLite: no Docker, no database server, no queue.
