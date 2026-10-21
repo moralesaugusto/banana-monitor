@@ -67,9 +67,9 @@ Configuration that is secret or environment-specific lives in `.env` (see `.env.
 
 ### Tajonaso
 
-Every fresh install seeds a disabled AI Mode agent named **Tajonaso**, wired to call out to an external offensive-security tool server (HexStrike AI) that you have to run and configure separately - Banana ships no exploitation code itself. Unlike the other agents, Tajonaso runs without a human-approval gate once started.
+Every fresh install seeds an AI Mode agent named **Tajonaso**, wired to call out to an external offensive-security tool server (HexStrike AI) that you have to run and configure separately - Banana ships no exploitation code itself. Unlike the other agents, Tajonaso runs without a human-approval gate once started.
 
-It does nothing unless you enable AI Mode, point its tool server at an instance you control, and start it yourself. **Only ever point it at systems you own or are explicitly authorized to test.** If you don't want this capability in your install at all, delete the Tajonaso agent (AI Mode > Agents) and don't configure a tool server for it.
+It does nothing unless you enable AI Mode in Settings, point its tool server at an instance you control, and start it (AI Mode > Agents). **Only ever point it at systems you own or are explicitly authorized to test.** If you don't want this capability in your install at all, delete the Tajonaso agent (AI Mode > Agents) and don't configure a tool server for it.
 
 ## Documentation
 
