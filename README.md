@@ -44,12 +44,15 @@ It does nothing unless you enable AI Mode in Settings, point its tool server at 
 
 ## Screenshots
 
-All data below is invented demo data.
+The first four show invented demo data. The AI Mode ones below are real, from an actual install - agent names, call counts, token usage and latency are genuine, nothing about your own network.
 
 | | |
 |---|---|
 | ![Overview](assets/screenshots/overview.png) | ![Devices](assets/screenshots/devices.png) |
 | ![Network map](assets/screenshots/network-map.png) | ![AI agents](assets/screenshots/agents.png) |
+| ![Agent workflow](assets/screenshots/workflow.png) | ![Bus routing table](assets/screenshots/bus-routing.png) |
+| ![Bus topics](assets/screenshots/bus-topics.png) | ![Bus queues and health](assets/screenshots/bus-queues.png) |
+| ![Agent performance](assets/screenshots/performance.png) | ![Agent cost](assets/screenshots/cost.png) |
 
 ## Quick start
 
