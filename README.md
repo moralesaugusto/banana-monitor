@@ -28,6 +28,7 @@ It runs as a single Python process with SQLite storage, so there is no Docker, n
 - **Get a second opinion on odd hosts.** Optional local-LLM agents (Ollama, nothing leaves your LAN) inspect hosts read-only for failed logins, pending updates and slow services, and ask for your approval before anything changes.
 - **Share a status report.** Generate a network and services report as a PDF, or ask the Telegram bot for `/status` from your phone.
 - **Run it without an ops project.** One Python process and SQLite: no Docker, no database server, no queue.
+- **See why a multi-agent run did what it did.** Each agent runs independently and only talks through the pub/sub bus, so you can watch, topic by topic, which agent published what, who picked it up, and how long it sat in a queue - instead of guessing from a final answer.
 
 ## Screenshots
 
