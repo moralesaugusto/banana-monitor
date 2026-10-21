@@ -6,6 +6,18 @@ Banana is a self-hosted monitoring platform for a home LAN. It answers one quest
 
 It runs as a single Python process with SQLite storage, so there is no Docker, no database server and no message queue to operate.
 
+## Security
+
+Banana is designed for a trusted LAN. The dashboard needs a login (first sign-in `admin` / `admin`, changed immediately) and is served over TLS 1.3 only, with an elliptic-curve certificate, AES-256-GCM and a hybrid post-quantum key exchange where the client supports it. Keep it bound to `127.0.0.1` (the default in `.env.example`) or behind a firewall. Do not expose it to the internet.
+
+Configuration that is secret or environment-specific lives in `.env` (see `.env.example`) or in the UI, never in the repository. The `.gitignore` excludes `.env`, databases, certificates and the master key.
+
+### Tajonaso
+
+Every fresh install seeds an AI Mode agent named **Tajonaso**, wired to call out to an external offensive-security tool server (HexStrike AI) that you have to run and configure separately - Banana ships no exploitation code itself. Unlike the other agents, Tajonaso runs without a human-approval gate once started.
+
+It does nothing unless you enable AI Mode in Settings, point its tool server at an instance you control, and start it (AI Mode > Agents). **Only ever point it at systems you own or are explicitly authorized to test.** If you don't want this capability in your install at all, delete the Tajonaso agent (AI Mode > Agents) and don't configure a tool server for it.
+
 ## Features
 
 - **Monitoring:** Linux hosts over SSH, Windows hosts over WinRM, Proxmox VE (hosts, VMs, containers), and HTTP, HTTPS, TCP, DNS and DHCP checks. AdGuard Home, Homebridge and TP-Link Omada plugins are included.
@@ -60,18 +72,6 @@ make run       # same as: cd backend && uv run banana
 Running the app needs no other step.
 
 Then open https://localhost:8000 (a self-signed certificate is generated on first run). [`INSTRUCTIONS.md`](INSTRUCTIONS.md) has the full walkthrough, including the development setup with hot reload.
-
-## Security
-
-Banana is designed for a trusted LAN. The dashboard needs a login (first sign-in `admin` / `admin`, changed immediately) and is served over TLS 1.3 only, with an elliptic-curve certificate, AES-256-GCM and a hybrid post-quantum key exchange where the client supports it. Keep it bound to `127.0.0.1` (the default in `.env.example`) or behind a firewall. Do not expose it to the internet.
-
-Configuration that is secret or environment-specific lives in `.env` (see `.env.example`) or in the UI, never in the repository. The `.gitignore` excludes `.env`, databases, certificates and the master key.
-
-### Tajonaso
-
-Every fresh install seeds an AI Mode agent named **Tajonaso**, wired to call out to an external offensive-security tool server (HexStrike AI) that you have to run and configure separately - Banana ships no exploitation code itself. Unlike the other agents, Tajonaso runs without a human-approval gate once started.
-
-It does nothing unless you enable AI Mode in Settings, point its tool server at an instance you control, and start it (AI Mode > Agents). **Only ever point it at systems you own or are explicitly authorized to test.** If you don't want this capability in your install at all, delete the Tajonaso agent (AI Mode > Agents) and don't configure a tool server for it.
 
 ## Documentation
 
