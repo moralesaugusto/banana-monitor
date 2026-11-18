@@ -26,10 +26,21 @@ It does nothing unless you enable AI Mode in Settings, point its tool server at 
 - **Metrics:** history with automatic rollups and a size-bounded retention policy.
 - **AI Mode:** a small team of local-LLM agents (Ollama) that discover and double-check services, inspect hosts for health, update and security problems (Bellaco, Sinverguenza), with human approval gates and full run traces. One agent, Tajonaso, is different from the rest - see the warning below.
 - **Transparent agent bus:** agents run concurrently, one `asyncio` task each, and only talk through a pub/sub message bus (dot-separated topics, `*`/`#` wildcard subscriptions) - never by calling each other directly. The UI shows the live routing table, per-topic message log, queue depth and per-agent state, and a workflow canvas of who publishes to whom, so a multi-agent run stays inspectable rather than a black box.
+- **Knowledge base (RAG):** an optional store of notes your agents can search by meaning and add to, so what one run learned is available to the next. See below.
 - **Reports:** one report per network when an AI run ends (every host, with OS, patches, findings and changes), plus on-demand snapshots; written in Markdown and downloadable as Markdown or PDF.
 - **Telegram:** talk to the assistant, get `/status` and PDF reports, and receive alerts in a chat.
 - **Self-monitoring:** the platform watches its own health.
 - **Credentials:** stored encrypted in a separate database, never returned by the API.
+
+### Knowledge base (RAG)
+
+An optional, off-by-default memory for the agents. Text is split into short chunks, turned into vectors by an embedding model, and stored in an embedded Qdrant database (no extra server). An agent with the tools enabled can call `search_knowledge` with a plain-language question and get the most similar notes back, ranked by score, even when they use different words. It can call `add_knowledge_entry` to save a finding for later runs. That is retrieval-augmented generation: the model answers from what it retrieves, not only from its training.
+
+- **Turn it on** under Knowledge > Settings: pick the embedding host and model (default `nomic-embed-text` on your Ollama) and an optional API key. Text is sent only to the embedding host you configure.
+- **Collections:** `LAN notes`, `Security knowledge` and `Sandbox` are created for you; add your own. Each is searched separately.
+- **Browse, edit and add** entries by hand, see them on a **Map** (a 2D projection of the vectors), and read a plain-language "How it works" page in the app.
+- **Changing the embedding model** marks old entries as mismatched instead of silently mixing vectors; a **Re-embed** button per collection rebuilds them.
+- **Safe by default:** an agent can only use the two tools if both the global switch and its own tool list allow them, and a failed embedding call is reported, never swallowed.
 
 ### The default agents
 
