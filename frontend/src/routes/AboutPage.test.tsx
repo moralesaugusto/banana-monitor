@@ -105,6 +105,30 @@ describe('AboutPage', () => {
     await waitFor(() => expect(saved).toEqual({ max_db_size_mb: 256 }))
   })
 
+  it('starts from scratch only after typing RESET, and says the AI card clears only AI', async () => {
+    let resets = 0
+    server.use(
+      http.get('/api/about', () => HttpResponse.json({})),
+      http.post('/api/system/reset', async ({ request }) => {
+        expect(await request.json()).toEqual({ confirm: 'RESET' })
+        resets += 1
+        return HttpResponse.json({ devices: 3, services: 5 })
+      }),
+    )
+    const prompt = vi.spyOn(window, 'prompt').mockReturnValueOnce('nope').mockReturnValueOnce('RESET')
+    renderPage()
+
+    expect(await screen.findByText(/returns this installation to a fresh install/)).toBeInTheDocument()
+    expect(screen.getByText(/Clears only the AI subsystem/)).toBeInTheDocument()
+    const button = screen.getByRole('button', { name: 'Delete everything' })
+    await userEvent.click(button)
+    expect(resets).toBe(0)
+    await userEvent.click(button)
+    await waitFor(() => expect(resets).toBe(1))
+    expect(prompt).toHaveBeenCalledTimes(2)
+    expect(await screen.findByText('Removed 3 device(s) and 5 service(s).')).toBeInTheDocument()
+  })
+
   it('resets AI Mode from the AI subsystem card after confirmation', async () => {
     let resets = 0
     server.use(

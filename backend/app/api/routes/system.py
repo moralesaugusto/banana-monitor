@@ -17,8 +17,9 @@ from app.discovery.network_scanner import run_discovery_for_all_networks
 from app.discovery.scan_status import get_scan_status_registry
 from app.domain.bootstrap import ensure_default_discovery_settings
 from app.domain.models import AiAgent, DiscoverySettings
+from app.llm.agent import running_run_id
 from app.llm.agent_tools import WEB_TOOL_NAMES
-from app.maintenance import reset_inventory
+from app.maintenance import reset_everything
 from app.scheduler.supervisor import get_supervisor
 
 router = APIRouter(prefix="/system", tags=["system"])
@@ -84,7 +85,9 @@ class ResetRequest(BaseModel):
 
 @router.post("/reset")
 async def reset(payload: ResetRequest) -> dict[str, int]:
-    """Wipes devices, services, candidates and their history so discovery restarts clean."""
+    """Start from scratch: everything but the administrator login, audit log and stored credentials."""
     if payload.confirm != "RESET":
         raise HTTPException(status_code=400, detail='Send {"confirm": "RESET"} to proceed')
-    return await reset_inventory(get_databases(), get_supervisor())
+    if await running_run_id(get_databases()) is not None:
+        raise HTTPException(status_code=409, detail="Stop the running AI Mode run before resetting")
+    return await reset_everything(get_databases(), get_supervisor())

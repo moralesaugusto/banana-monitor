@@ -32,6 +32,7 @@ from app.domain.bootstrap import (
 from app.domain.enums import AssistantProvider, EventSeverity
 from app.domain.models import (
     AiAgent,
+    AiAgentMemory,
     AiCustomTool,
     AiGuardrail,
     AiMcpServer,
@@ -317,7 +318,7 @@ async def reset_ai_mode(session: AppSession) -> None:
         await session.execute(delete(AiMessage))
         await session.execute(delete(AiRunStep))
         await session.execute(delete(AiRun))
-        for model in (AiAgent, AiCustomTool, AiMcpServer, AiGuardrail, AiModeSettings):
+        for model in (AiAgent, AiAgentMemory, AiCustomTool, AiMcpServer, AiGuardrail, AiModeSettings):
             await session.execute(delete(model))
         (await ensure_default_discovery_settings(session)).ai_mode_enabled = False
         await session.commit()

@@ -178,25 +178,31 @@ function ResetCard() {
     <Card className="border-red-500/40 p-4">
       <div className="text-sm font-medium text-fg">Start from scratch</div>
       <p className="mt-1 text-xs text-fg-muted">
-        Deletes every device and service, discovery candidates, and their history. Networks, integrations,
-        credentials, alert rules and settings are kept; run a scan afterwards to rediscover hosts.
+        Deletes everything and returns this installation to a fresh install: devices and services, networks,
+        integrations, discovery candidates and settings, alert rules and alerts, events, reports and findings,
+        every metric and statistic, Telegram and assistant settings, all AI Mode runs, agents, tools,
+        guardrails, settings and memory, and the whole knowledge base. Kept: your administrator login, the
+        audit log, and stored credentials with the master key. A run in progress must be stopped first. To
+        clear only the AI subsystem, use the card below.
       </p>
       <button
         type="button"
         disabled={reset.isPending}
         className="mt-3 rounded-control border border-red-500/60 px-3 py-1.5 text-sm font-medium text-red-600 hover:bg-red-500/10 disabled:opacity-50 dark:text-red-400"
         onClick={() => {
-          if (window.prompt('Type RESET to delete all devices and services') === 'RESET') reset.mutate()
+          if (window.prompt('Type RESET to delete everything and start from scratch') === 'RESET') reset.mutate()
         }}
       >
-        Delete all devices and services
+        Delete everything
       </button>
       {reset.isSuccess && (
         <p className="mt-2 text-xs text-fg-muted">
           Removed {reset.data.devices} device(s) and {reset.data.services} service(s).
         </p>
       )}
-      {reset.isError && <p className="mt-2 text-xs text-red-600 dark:text-red-400">Reset failed.</p>}
+      {reset.isError && (
+        <p className="mt-2 text-xs text-red-600 dark:text-red-400">{String((reset.error as Error).message).slice(0, 200)}</p>
+      )}
     </Card>
   )
 }
@@ -207,8 +213,10 @@ function AiResetCard() {
     <Card className="border-red-500/40 p-4">
       <div className="text-sm font-medium text-fg">Start from scratch (AI subsystem)</div>
       <p className="mt-1 text-xs text-fg-muted">
-        Deletes every AI run and message, all agents, custom tools, guardrails and the schedule, and puts every setting back to its
-        default. AI Mode is switched off. Services the agents already recorded are kept. A run in progress must be stopped first.
+        Clears only the AI subsystem: every AI run and message, all agents and their memory, custom tools, MCP servers,
+        guardrails and the schedule, and puts every AI setting back to its default. AI Mode is switched off.
+        Everything else is kept: devices, services, networks, statistics, alerts, reports and findings, the knowledge base and
+        stored credentials. A run in progress must be stopped first.
       </p>
       <button
         type="button"
