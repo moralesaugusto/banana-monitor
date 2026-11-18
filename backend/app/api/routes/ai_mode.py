@@ -1,4 +1,3 @@
-
 from fastapi import APIRouter, HTTPException
 from sqlalchemy import delete, func, select
 
@@ -15,7 +14,13 @@ from app.api.schemas.ai_mode import (
     CustomToolRead,
     GuardrailBase,
     GuardrailRead,
+    ToolAgent,
+    ToolAvailability,
     ToolInfo,
+    ToolTestResult,
+    ToolTrace,
+    ToolUsage,
+    TryCallRequest,
 )
 from app.background import named_lock, spawn
 from app.db.session import get_databases
@@ -24,16 +29,18 @@ from app.domain.bootstrap import (
     ensure_default_ai_mode_settings,
     ensure_default_discovery_settings,
 )
-from app.domain.enums import AssistantProvider
+from app.domain.enums import AssistantProvider, EventSeverity
 from app.domain.models import (
     AiAgent,
     AiCustomTool,
     AiGuardrail,
+    AiMcpServer,
     AiMessage,
     AiMessageDelivery,
     AiModeSettings,
     AiRun,
     AiRunStep,
+    Event,
 )
 from app.llm.agent import (
     DEFAULT_SYSTEM_PROMPT,
@@ -43,8 +50,14 @@ from app.llm.agent import (
     running_run_id,
 )
 from app.llm.agent_tools import _ALLOWED_FLAG, ALL_TOOL_NAMES, TOOL_SCHEMAS
+from app.llm.credential_pool import SAFEGUARD_LABELS
 from app.llm.orchestrator import get_context, run_agent
 from app.llm.schedule import next_targets
+from app.llm.tool_availability import tool_availability
+from app.llm.tool_guide import RUNS_ON_LABELS, TOOL_GUIDES
+from app.llm.tool_pipeline import trace_call
+from app.llm.tool_test import test_all_custom_tools, test_custom_tool
+from app.llm.tool_usage import tool_usage
 
 router = APIRouter(prefix="/ai-mode", tags=["ai-mode"])
 
@@ -58,6 +71,7 @@ GUARDRAILS = [
     "The only write the agent can make is creating an unmanaged service; it cannot delete or monitor.",
     "One run at a time; the loop is bounded by the iteration limit.",
 ]
+
 
 async def _read_settings(session: AppSession) -> AiModeSettingsRead:
     settings = await ensure_default_ai_mode_settings(session)
@@ -91,6 +105,19 @@ async def update_settings(
     enabled = updates.pop("enabled", None)
 
     settings = await ensure_default_ai_mode_settings(session)
+    if "cost_budget_usd" in updates and updates["cost_budget_usd"] != settings.cost_budget_usd:
+        settings.cost_budget_alert_sent = False
+    for field in SAFEGUARD_LABELS:
+        if field in updates and updates[field] != getattr(settings, field):
+            state = "relaxed" if updates[field] else "restored"
+            session.add(
+                Event(
+                    source="ai",
+                    severity=EventSeverity.WARNING,
+                    category="ai_safeguard",
+                    message=f"Credential safeguard {state}: {SAFEGUARD_LABELS[field]}",
+                )
+            )
     for field, value in updates.items():
         setattr(settings, field, value)
     if enabled is not None:
@@ -107,20 +134,51 @@ async def update_settings(
     return await _read_settings(session)
 
 
+@router.get("/tools/usage", response_model=list[ToolUsage])
+async def get_tool_usage(session: AppSession) -> list[ToolUsage]:
+    return await tool_usage(session)
+
+
+@router.post("/tools/{name}/try", response_model=ToolTrace)
+async def try_tool_call(name: str, payload: TryCallRequest, session: AppSession) -> ToolTrace:
+    """Walks a hand-written tool call through the gates a real one passes, without running anything."""
+    agent = None
+    if payload.agent_id is not None:
+        agent = await session.get(AiAgent, payload.agent_id)
+        if agent is None:
+            raise HTTPException(status_code=404, detail="Agent not found")
+    return await trace_call(session, get_databases(), name, payload.arguments, agent)
+
+
+@router.get("/tools/availability", response_model=list[ToolAvailability])
+async def get_tool_availability(session: AppSession) -> list[ToolAvailability]:
+    return await tool_availability(session)
+
+
 @router.get("/tools", response_model=AiModeTools)
 async def get_tools(session: AppSession) -> AiModeTools:
     settings = await ensure_default_ai_mode_settings(session)
-    return AiModeTools(
-        default_system_prompt=DEFAULT_SYSTEM_PROMPT,
-        tools=[
+    holders = list(await session.scalars(select(AiAgent).where(AiAgent.enabled).order_by(AiAgent.name)))
+    tools = []
+    for t in TOOL_SCHEMAS:
+        name = t["function"]["name"]
+        guide = TOOL_GUIDES[name]
+        tools.append(
             ToolInfo(
-                name=t["function"]["name"],
+                name=name,
                 description=t["function"]["description"],
                 parameters=t["function"]["parameters"],
-                enabled=t["function"]["name"] in settings.enabled_tools,
+                enabled=name in settings.enabled_tools,
+                runs_on=guide.runs_on,
+                runs_on_label=RUNS_ON_LABELS[guide.runs_on],
+                where=guide.where,
+                safeguards=list(guide.safeguards),
+                agents=[ToolAgent(id=a.id, name=a.name) for a in holders if name in a.enabled_tools],
             )
-            for t in TOOL_SCHEMAS
-        ],
+        )
+    return AiModeTools(
+        default_system_prompt=DEFAULT_SYSTEM_PROMPT,
+        tools=tools,
         guardrails=GUARDRAILS,
         allowed_nmap_flags=_ALLOWED_FLAG.pattern,
     )
@@ -143,6 +201,18 @@ async def _summaries(session: AppSession, runs: list[AiRun]) -> list[AiRunSummar
         .group_by(AiRunStep.run_id)
     )
     recorded: dict[int, int] = {run_id: count for run_id, count in recorded_rows.all()}
+    agents: dict[int, set[str]] = {}
+    tools: dict[int, set[str]] = {}
+    name_rows = await session.execute(
+        select(AiRunStep.run_id, AiRunStep.kind, AiRunStep.name, AiRunStep.agent)
+        .where(AiRunStep.run_id.in_(ids), AiRunStep.kind.in_(("llm", "tool")))
+        .distinct()
+    )
+    for run_id, kind, name, agent in name_rows.all():
+        if agent:
+            agents.setdefault(run_id, set()).add(agent)
+        if kind == "tool" and name:
+            tools.setdefault(run_id, set()).add(name)
     summaries = []
     for run in runs:
         item = AiRunSummary.model_validate(run)
@@ -151,6 +221,8 @@ async def _summaries(session: AppSession, runs: list[AiRun]) -> list[AiRunSummar
         item.step_count = steps.get(run.id, 0)
         item.services_recorded = recorded.get(run.id, 0)
         item.entry_agent = str(run.settings_snapshot.get("entry_agent") or "")
+        item.agents = sorted(agents.get(run.id, set()) | ({item.entry_agent} - {""}))
+        item.tools = sorted(tools.get(run.id, set()))
         summaries.append(item)
     return summaries
 
@@ -168,8 +240,10 @@ async def get_run(run_id: int, session: AppSession) -> AiRunDetail:
     if run is None:
         raise HTTPException(status_code=404, detail="Run not found")
     steps = (
-        await session.execute(select(AiRunStep).where(AiRunStep.run_id == run_id).order_by(AiRunStep.idx))
-    ).scalars().all()
+        (await session.execute(select(AiRunStep).where(AiRunStep.run_id == run_id).order_by(AiRunStep.idx)))
+        .scalars()
+        .all()
+    )
     summary = (await _summaries(session, [run]))[0]
     return AiRunDetail(
         **summary.model_dump(),
@@ -243,7 +317,7 @@ async def reset_ai_mode(session: AppSession) -> None:
         await session.execute(delete(AiMessage))
         await session.execute(delete(AiRunStep))
         await session.execute(delete(AiRun))
-        for model in (AiAgent, AiCustomTool, AiGuardrail, AiModeSettings):
+        for model in (AiAgent, AiCustomTool, AiMcpServer, AiGuardrail, AiModeSettings):
             await session.execute(delete(model))
         (await ensure_default_discovery_settings(session)).ai_mode_enabled = False
         await session.commit()
@@ -282,6 +356,14 @@ async def create_custom_tool(payload: CustomToolBase, session: AppSession) -> Ai
     return tool
 
 
+@router.post("/custom-tools/test-all", response_model=list[ToolTestResult])
+async def test_all_custom_tools_route(session: AppSession) -> list[ToolTestResult]:
+    """Actually calls every enabled custom tool (see app.llm.tool_test) - not a listing check."""
+    tools = list(await session.scalars(select(AiCustomTool).where(AiCustomTool.enabled)))
+    guardrails = list(await session.scalars(select(AiGuardrail).where(AiGuardrail.enabled)))
+    return await test_all_custom_tools(get_databases(), tools, guardrails)
+
+
 @router.put("/custom-tools/{tool_id}", response_model=CustomToolRead)
 async def update_custom_tool(tool_id: int, payload: CustomToolBase, session: AppSession) -> AiCustomTool:
     tool = await _custom_tool_or_404(session, tool_id)
@@ -297,8 +379,19 @@ async def delete_custom_tool(tool_id: int, session: AppSession) -> None:
     tool = await _custom_tool_or_404(session, tool_id)
     settings = await ensure_default_ai_mode_settings(session)
     settings.enabled_tools = [n for n in settings.enabled_tools if n != tool.name]
+    for agent in await session.scalars(select(AiAgent)):
+        if tool.name in agent.enabled_tools:
+            agent.enabled_tools = [n for n in agent.enabled_tools if n != tool.name]
     await session.delete(tool)
     await session.commit()
+
+
+@router.post("/custom-tools/{tool_id}/test", response_model=ToolTestResult)
+async def test_custom_tool_route(tool_id: int, session: AppSession) -> ToolTestResult:
+    """Actually calls this one tool (see app.llm.tool_test) - not a listing check."""
+    tool = await _custom_tool_or_404(session, tool_id)
+    guardrails = list(await session.scalars(select(AiGuardrail).where(AiGuardrail.enabled)))
+    return await test_custom_tool(get_databases(), tool, guardrails)
 
 
 @router.get("/guardrails", response_model=list[GuardrailRead])

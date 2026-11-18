@@ -36,10 +36,11 @@ async def test_ai_mode_settings_tools_and_gating(client: AsyncClient) -> None:
         "run_nc",
         "record_service",
         "report_open_ports",
+        "record_finding",
         "discover_hosts",
         "publish_message",
         "get_network_snapshot",
-            "get_status_delta",
+        "get_status_delta",
         "save_report",
         "web_search",
         "fetch_url",
@@ -51,8 +52,82 @@ async def test_ai_mode_settings_tools_and_gating(client: AsyncClient) -> None:
         "http_inspect",
         "apply_updates",
         "submit_http_form",
+        "remember",
+        "search_knowledge",
+        "add_knowledge_entry",
     } == set(enabled)
     assert tools["guardrails"] and tools["default_system_prompt"]
+
+
+@pytest.mark.asyncio
+async def test_knowledge_base_toggle_defaults_off_and_is_editable_via_existing_settings_route(
+    client: AsyncClient,
+) -> None:
+    settings = (await client.get("/api/ai-mode/settings")).json()
+    assert settings["knowledge_base_enabled"] is False
+    assert settings["knowledge_embedding_model"] == "nomic-embed-text"
+
+    updated = await client.put(
+        "/api/ai-mode/settings",
+        json={"knowledge_base_enabled": True, "knowledge_embedding_model": "mxbai-embed-large"},
+    )
+    body = updated.json()
+    assert body["knowledge_base_enabled"] is True
+    assert body["knowledge_embedding_model"] == "mxbai-embed-large"
+
+    again = (await client.get("/api/ai-mode/settings")).json()
+    assert again["knowledge_base_enabled"] is True
+    assert again["knowledge_embedding_model"] == "mxbai-embed-large"
+
+
+@pytest.mark.asyncio
+async def test_memory_limits_are_a_global_default_with_a_per_agent_override(client: AsyncClient) -> None:
+    settings = (await client.get("/api/ai-mode/settings")).json()
+    assert (
+        settings["memory_max_entries_per_agent"],
+        settings["memory_max_content_chars"],
+        settings["memory_max_inject_chars"],
+    ) == (50, 200, 4000)
+
+    updated = await client.put(
+        "/api/ai-mode/settings",
+        json={
+            "memory_max_entries_per_agent": 10,
+            "memory_max_content_chars": 200,
+            "memory_max_inject_chars": 1000,
+        },
+    )
+    body = updated.json()
+    assert (
+        body["memory_max_entries_per_agent"],
+        body["memory_max_content_chars"],
+        body["memory_max_inject_chars"],
+    ) == (10, 200, 1000)
+
+    agents = {a["name"]: a["id"] for a in (await client.get("/api/ai-mode/agents")).json()}
+    agent = (await client.get("/api/ai-mode/agents")).json()[0]
+    assert agent["memory_max_entries_override"] == 0
+    assert agent["memory_max_content_chars_override"] == 0
+    assert agent["memory_max_inject_chars_override"] == 0
+
+    patched = await client.put(
+        f"/api/ai-mode/agents/{agents['bellaco']}",
+        json={
+            **agent,
+            "name": "bellaco",
+            "memory_max_entries_override": 5,
+            "memory_max_content_chars_override": 50,
+            "memory_max_inject_chars_override": 300,
+        },
+    )
+    assert patched.status_code == 200
+    patched_body = patched.json()
+    assert patched_body["memory_max_entries_override"] == 5
+    assert patched_body["memory_max_content_chars_override"] == 50
+    assert patched_body["memory_max_inject_chars_override"] == 300
+
+    bad = await client.put("/api/ai-mode/settings", json={"memory_max_entries_per_agent": 0})
+    assert bad.status_code == 422
 
 
 @pytest.mark.asyncio
@@ -374,12 +449,12 @@ async def test_run_without_known_devices_needs_a_network_and_then_finds_hosts_it
     nothing = await client.post("/api/ai-mode/runs", json={})
     assert nothing.status_code == 400 and "no network" in nothing.json()["detail"]
 
-    await client.post("/api/networks", json={"name": "LAN", "cidr": "192.168.1.0/24"})
+    await client.post("/api/networks", json={"name": "LAN", "cidr": "10.0.0.0/24"})
     started = await client.post("/api/ai-mode/runs", json={})
     assert started.status_code == 202
     detail = (await client.get(f"/api/ai-mode/runs/{started.json()['id']}")).json()
     assert detail["targets"] == []
-    assert detail["settings_snapshot"]["networks"][0]["cidr"] == "192.168.1.0/24"
+    assert detail["settings_snapshot"]["networks"][0]["cidr"] == "10.0.0.0/24"
 
 
 @pytest.mark.asyncio
@@ -474,3 +549,25 @@ async def test_llm_concurrency_caps_are_tunable_bounded_and_snapshotted(
     snapshot = (await client.get(f"/api/ai-mode/runs/{run['id']}")).json()["settings_snapshot"]
     assert snapshot["ollama_max_concurrent_calls"] == 1
     assert snapshot["openrouter_max_concurrent_calls"] == 8
+
+
+async def test_run_summaries_list_the_agents_and_tools_that_took_part(client: AsyncClient) -> None:
+    async with get_databases().app_session_factory() as session:
+        run = AiRun(settings_snapshot={"entry_agent": "bellaco"})
+        session.add(run)
+        await session.flush()
+        steps = [
+            ("llm", "m", "discoverer"),
+            ("tool", "run_nmap", "discoverer"),
+            ("tool", "run_nmap", "discoverer"),
+            ("tool", "record_service", "reporter"),
+            ("error", None, None),
+        ]
+        for idx, (kind, name, agent) in enumerate(steps):
+            fields = {"kind": kind, "name": name, "agent": agent}
+            session.add(AiRunStep(run_id=run.id, idx=idx, request={}, response={}, **fields))
+        await session.commit()
+
+    [summary] = (await client.get("/api/ai-mode/runs")).json()
+    assert summary["agents"] == ["bellaco", "discoverer", "reporter"]
+    assert summary["tools"] == ["record_service", "run_nmap"]

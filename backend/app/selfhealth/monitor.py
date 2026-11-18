@@ -41,7 +41,7 @@ async def ensure_self_health_device(databases: Databases) -> int:
 class SelfHealthMonitor:
     """The platform monitors its own event-loop responsiveness, DB sizes, and
     active poll-task count as a normal Device - reusing the existing model
-    rather than a parallel concept, per AGENTS.md's self-health requirement.
+    rather than a parallel concept.
     """
 
     def __init__(
@@ -87,6 +87,12 @@ class SelfHealthMonitor:
             entity_id=device_id,
             metric_name="active_poll_tasks",
             value=float(self._supervisor.active_task_count()),
+        )
+        self._metrics_writer.enqueue_metric_sample(
+            entity_type=EntityType.DEVICE,
+            entity_id=device_id,
+            metric_name="metrics_backlog_dropped_total",
+            value=float(self._metrics_writer.dropped),
         )
 
         async with self._databases.app_session_factory() as session:

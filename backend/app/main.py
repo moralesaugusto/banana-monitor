@@ -12,6 +12,7 @@ from app.api.routes import (
     about,
     ai_agents,
     ai_cost,
+    ai_mcp,
     ai_mode,
     ai_performance,
     alerts,
@@ -22,6 +23,7 @@ from app.api.routes import (
     discovery,
     events,
     integrations,
+    knowledge,
     maintenance,
     networks,
     overview,
@@ -44,10 +46,12 @@ from app.discovery.network_scanner import SCHEDULER_TICK_SECONDS, run_scheduled_
 from app.discovery.reachability import REACHABILITY_INTERVAL_SECONDS, run_reachability
 from app.discovery.service import DiscoveredServiceStore, DiscoveryService
 from app.domain.bootstrap import (
+    ensure_default_agents,
     ensure_default_assistant_config,
     ensure_default_discovery_settings,
     ensure_default_site,
 )
+from app.knowledge.service import ensure_default_knowledge_collections
 from app.llm.schedule import SCHEDULE_TICK_SECONDS, run_ai_schedule
 from app.logging_setup import configure_logging, get_logger
 from app.metrics.rollup import ROLLUP_INTERVAL_SECONDS, enforce_size_limit, run_rollup_and_retention
@@ -87,6 +91,10 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         await ensure_default_assistant_config(session)
         await ensure_default_discovery_settings(session)
         await ensure_default_admin(session)
+        # Seeded here, not left to the first request that reads them: the AI pages fire several requests at
+        # once, and two of them each seeding a fresh database collide on the unique agent name (a 500).
+        await ensure_default_agents(session)
+    await ensure_default_knowledge_collections(databases)
 
     await DiscoveryService(databases).merge_duplicate_devices()
     await DiscoveredServiceStore(databases).reconcile()
@@ -188,12 +196,14 @@ def create_app() -> FastAPI:
     app.include_router(assistant.router, prefix="/api")
     app.include_router(about.router, prefix="/api")
     app.include_router(ai_mode.router, prefix="/api")
+    app.include_router(ai_mcp.router, prefix="/api")
     app.include_router(ai_agents.router, prefix="/api")
     app.include_router(ai_cost.router, prefix="/api")
     app.include_router(ai_performance.router, prefix="/api")
     app.include_router(topology.router, prefix="/api")
     app.include_router(ssh_host_keys.router, prefix="/api")
     app.include_router(reports.router, prefix="/api")
+    app.include_router(knowledge.router, prefix="/api")
     app.include_router(telegram.router, prefix="/api")
     app.include_router(system.router, prefix="/api")
     app.include_router(maintenance.router, prefix="/api")
@@ -215,11 +225,13 @@ def _mount_frontend(app: FastAPI, dist_dir: Path) -> None:
 
     @app.get("/{full_path:path}")
     async def spa_fallback(full_path: str) -> FileResponse:
-        """A real file in the build (favicon.svg) is served as itself; any other path is a page route."""
+        """A real file in the build (favicon.svg) is served as itself; any other path is a page route.
+        Both are served no-cache: unlike /assets's content-hashed files, these keep a stable URL across
+        builds, so a browser's own cache would otherwise keep serving a pre-rebuild version indefinitely."""
         candidate = (root / full_path).resolve()
         if candidate.is_file() and candidate.is_relative_to(root):
-            return FileResponse(candidate)
-        return FileResponse(index_path)
+            return FileResponse(candidate, headers={"Cache-Control": "no-cache"})
+        return FileResponse(index_path, headers={"Cache-Control": "no-cache"})
 
 
 app = create_app()

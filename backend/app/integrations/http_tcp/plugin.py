@@ -6,7 +6,7 @@ from typing import Any, ClassVar
 from urllib.parse import urlsplit
 
 import httpx
-from pydantic import BaseModel, model_validator
+from pydantic import BaseModel, Field, model_validator
 
 from app.integrations.base import (
     DiscoveredItem,
@@ -31,8 +31,8 @@ class HttpTcpConfig(BaseModel):
     url: str | None = None
     host: str | None = None
     port: int | None = None
-    timeout_seconds: float = 5.0
-    interval_seconds: float = 30.0
+    timeout_seconds: float = Field(default=5.0, gt=0)
+    interval_seconds: float = Field(default=30.0, gt=0)
     expected_status: int | None = None
     verify_tls: bool = True
 

@@ -9,7 +9,7 @@ Cached locally as a flat file under `Settings.data_dir` and loaded from
 there on first use - never downloaded automatically at startup, so a LAN
 with no internet reachability still starts and scans normally, just
 without vendor hints, consistent with this app's graceful-degradation
-requirements (see AGENTS.md). Refreshed only when `OuiRegistry.update()`
+requirements. Refreshed only when `OuiRegistry.update()`
 is called, i.e. the Discovery page's "Update vendor database" button /
 `POST /api/discovery/oui/update`.
 

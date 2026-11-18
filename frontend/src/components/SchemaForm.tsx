@@ -98,8 +98,10 @@ export function SchemaFieldsForm({ parsed, values, onChange, idPrefix, devices }
                 onChange={(e) => setField(field.key, e.target.checked)}
                 className="h-4 w-4 rounded border-line-strong accent-current text-accent"
               />
-              {field.title}
-              {field.required && <span className="text-red-500">*</span>}
+              <span>
+                {field.title}
+                {field.required && <span className="text-red-500">*</span>}
+              </span>
             </label>
           )
         }
@@ -107,8 +109,10 @@ export function SchemaFieldsForm({ parsed, values, onChange, idPrefix, devices }
         if (field.kind === 'enum') {
           return (
             <label key={field.key} htmlFor={id} className="flex flex-col text-sm">
-              {field.title}
-              {field.required && <span className="text-red-500">*</span>}
+              <span>
+                {field.title}
+                {field.required && <span className="text-red-500">*</span>}
+              </span>
               <select
                 id={id}
                 className={inputClasses}
@@ -132,8 +136,10 @@ export function SchemaFieldsForm({ parsed, values, onChange, idPrefix, devices }
         if (field.kind === 'integer' || field.kind === 'number') {
           return (
             <label key={field.key} htmlFor={id} className="flex flex-col text-sm">
-              {field.title}
-              {field.required && <span className="text-red-500">*</span>}
+              <span>
+                {field.title}
+                {field.required && <span className="text-red-500">*</span>}
+              </span>
               <input
                 id={id}
                 type="number"
@@ -152,8 +158,10 @@ export function SchemaFieldsForm({ parsed, values, onChange, idPrefix, devices }
 
         return (
           <label key={field.key} htmlFor={id} className="flex flex-col text-sm">
-            {field.title}
-            {field.required && <span className="text-red-500">*</span>}
+            <span>
+              {field.title}
+              {field.required && <span className="text-red-500">*</span>}
+            </span>
             <input
               id={id}
               type="text"

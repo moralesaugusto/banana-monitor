@@ -27,6 +27,7 @@ const cost: Cost = {
     { provider: 'ollama', model: 'qwen', calls: 6, prompt_tokens: 4_700, completion_tokens: 180, total_tokens: 4_880, max_context_tokens: 3_050, calls_without_usage: 0 },
   ],
   by_day: [{ day: '2026-10-14', calls: 6, prompt_tokens: 4_700, completion_tokens: 180 }],
+  actual_usd: 0,
 }
 
 const catalog = [
@@ -44,7 +45,10 @@ function renderPanel() {
 }
 
 describe('CostPanel', () => {
-  beforeEach(() => queryClient.clear())
+  beforeEach(() => {
+    queryClient.clear()
+    server.use(http.get('/api/ai-mode/settings', () => HttpResponse.json({ cost_budget_usd: null })))
+  })
   afterEach(() => vi.restoreAllMocks())
 
   it('shows the totals and the breakdown per agent, naming the chat assistant', async () => {
@@ -91,5 +95,33 @@ describe('CostPanel', () => {
 
   it('prices tokens per million', () => {
     expect(estimate(catalog[1], 1_000_000, 500_000)).toBeCloseTo(2)
+  })
+
+  it('shows the real amount actually spent, not just token counts', async () => {
+    server.use(http.get('/api/ai-mode/cost', () => HttpResponse.json({ ...cost, actual_usd: 4.2 })))
+    renderPanel()
+
+    expect(await screen.findByText('$4.20')).toBeInTheDocument()
+  })
+
+  it('warns when spend has crossed the configured budget', async () => {
+    server.use(
+      http.get('/api/ai-mode/cost', () => HttpResponse.json({ ...cost, actual_usd: 12 })),
+      http.get('/api/ai-mode/settings', () => HttpResponse.json({ cost_budget_usd: 10 })),
+    )
+    renderPanel()
+
+    expect(await screen.findByText(/over.*\$10\.00 budget/i)).toBeInTheDocument()
+  })
+
+  it('shows no budget warning when under it or when none is set', async () => {
+    server.use(
+      http.get('/api/ai-mode/cost', () => HttpResponse.json({ ...cost, actual_usd: 4 })),
+      http.get('/api/ai-mode/settings', () => HttpResponse.json({ cost_budget_usd: 10 })),
+    )
+    renderPanel()
+
+    await screen.findByText('$4.00')
+    expect(screen.queryByText(/budget/i)).not.toBeInTheDocument()
   })
 })

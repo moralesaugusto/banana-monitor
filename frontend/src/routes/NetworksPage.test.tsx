@@ -25,7 +25,7 @@ const NETWORKS: Network[] = [
 ]
 
 const CREDENTIALS: Credential[] = [
-  { id: 5, label: 'homelab-ssh', credential_type: 'ssh_key', created_at: '', rotated_at: null, last_used_at: null },
+  { id: 5, label: 'homelab-ssh', credential_type: 'ssh_key', created_at: '', rotated_at: null, last_used_at: null, used_by: [] },
 ]
 
 describe('NetworksPage', () => {

@@ -1,4 +1,4 @@
-"""Regression tests for the five problems in docs/bugs+2026-10-08-183232.md."""
+"""Regression tests for the five discovery problems found in testing."""
 
 import asyncio
 
@@ -11,6 +11,7 @@ from app.db.session import get_databases
 from app.discovery import network_scanner
 from app.discovery.service import DiscoveryService
 from app.discovery.techniques import icmp
+from app.domain.bootstrap import ensure_default_site
 from app.domain.enums import IntegrationStatus
 from app.domain.models import (
     Device,
@@ -186,6 +187,7 @@ async def test_a_different_mac_on_the_same_ip_is_a_different_device(client: Asyn
 async def test_existing_duplicates_are_merged_at_startup(client: AsyncClient) -> None:
     databases = get_databases()
     async with databases.app_session_factory() as session:
+        await ensure_default_site(session)
         # How the old matching left things: one device found without a MAC, one with.
         a = Device(site_id=1, display_name="a", primary_ip="10.0.0.9", device_type="other", managed=False)
         b = Device(site_id=1, display_name="b", primary_ip="10.0.0.9", device_type="other", managed=False)

@@ -29,18 +29,18 @@ export function AppShell() {
   }
 
   return (
-    <div className="flex min-h-screen flex-col bg-surface text-fg">
-      <TopBar onMenu={() => setMenuOpen(true)} />
+    <div className="flex min-h-screen bg-canvas text-fg">
       {menuOpen && (
-        <div className="fixed inset-0 top-14 z-30 bg-black/40 md:hidden" onClick={() => setMenuOpen(false)} aria-hidden />
+        <div className="fixed inset-0 z-30 bg-black/40 md:hidden" onClick={() => setMenuOpen(false)} aria-hidden />
       )}
-      <div className="flex min-h-0 flex-1">
-        <Sidebar
-          collapsed={collapsed}
-          onToggleCollapsed={toggleCollapsed}
-          mobileOpen={menuOpen}
-          onNavigate={() => setMenuOpen(false)}
-        />
+      <Sidebar
+        collapsed={collapsed}
+        onToggleCollapsed={toggleCollapsed}
+        mobileOpen={menuOpen}
+        onNavigate={() => setMenuOpen(false)}
+      />
+      <div className="flex min-w-0 flex-1 flex-col">
+        <TopBar onMenu={() => setMenuOpen(true)} />
         <main className="min-w-0 flex-1 overflow-x-clip p-4 md:p-6">
           <Outlet />
         </main>

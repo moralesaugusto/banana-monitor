@@ -19,16 +19,29 @@ from urllib.parse import urljoin, urlsplit
 
 import httpx
 from ddgs import DDGS
-from sqlalchemy import select
+from sqlalchemy import delete, select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.session import Databases
-from app.discovery.network_scanner import MAX_HOSTS_PER_SCAN, scan_cidr
+from app.discovery.network_scanner import MAX_HOSTS_PER_SCAN, host_count, scan_cidr
 from app.discovery.service import DiscoveredServiceStore, DiscoveryService
 from app.domain.bootstrap import ensure_default_ai_mode_settings, ensure_default_discovery_settings
 from app.domain.enums import ServiceType
-from app.domain.models import DeviceAddress, Network, Report
+from app.domain.models import (
+    FINDING_KINDS,
+    FINDING_SEVERITIES,
+    AiAgent,
+    AiAgentMemory,
+    Device,
+    DeviceAddress,
+    HostFinding,
+    Network,
+    Report,
+    utcnow,
+)
+from app.knowledge import service as knowledge_service
 from app.llm.inspect_tools import HANDLERS as _INSPECT_HANDLERS
-from app.llm.inspect_tools import MUTATING_TOOLS
+from app.llm.inspect_tools import INSPECT_TOOL_NAMES, MUTATING_TOOLS
 from app.llm.inspect_tools import SCHEMAS as _INSPECT_SCHEMAS
 from app.llm.tool_base import AgentToolError, truncate
 from app.llm.virustotal_tool import SCHEMA as VT_SCHEMA
@@ -56,6 +69,21 @@ _truncate = truncate
 WEB_TIMEOUT_SECONDS = 15.0
 MAX_FETCH_BYTES = 1_000_000
 MAX_REDIRECTS = 3
+
+
+async def effective_memory_limits(session: AsyncSession, agent_name: str) -> tuple[int, int, int]:
+    """Effective (max_entries, max_content_chars, max_inject_chars) for this agent: its own
+    override if set (non-zero) for each, else the administrator's global default. The single
+    place that resolves override-or-default for every `remember`/memory-injection size setting -
+    `remember()` below uses the first two (write path); orchestrator._memory_context uses the
+    third (injection path)."""
+    settings = await ensure_default_ai_mode_settings(session)
+    agent = await session.scalar(select(AiAgent).where(AiAgent.name == agent_name))
+    max_entries = (agent and agent.memory_max_entries_override) or settings.memory_max_entries_per_agent
+    max_chars = (agent and agent.memory_max_content_chars_override) or settings.memory_max_content_chars
+    max_inject = (agent and agent.memory_max_inject_chars_override) or settings.memory_max_inject_chars
+    return max_entries, max_chars, max_inject
+
 
 _ALLOWED_FLAG = re.compile(
     r"^(-sT|-sV|-sn|-Pn|-n|-F|-T[0-5]|--open|--reason"
@@ -164,6 +192,36 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
     {
         "type": "function",
         "function": {
+            "name": "record_finding",
+            "description": (
+                "Record one thing you learned about a host so it appears in the run's report: its operating "
+                "system and version (kind os), its patch level or pending updates (patch), a vulnerability "
+                "or misconfiguration (vulnerability), a performance or capacity problem (performance) or a "
+                "security incident (incident). Call it once per fact, as you learn it, not only at the end. "
+                "Only record what you actually observed on the host; if something does not apply or you "
+                "could not check it, say nothing rather than guess. Recording the same title again for the "
+                "same host updates it."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "ip": {"type": "string"},
+                    "kind": {"type": "string", "enum": list(FINDING_KINDS)},
+                    "severity": {
+                        "type": "string",
+                        "enum": list(FINDING_SEVERITIES),
+                        "description": "info for plain facts such as the OS version",
+                    },
+                    "title": {"type": "string", "description": "short, such as 'Debian 12.5'"},
+                    "detail": {"type": "string", "description": "evidence and what to do, a sentence or two"},
+                },
+                "required": ["ip", "kind", "title"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "discover_hosts",
             "description": (
                 "Ping- and port-sweep a whole CIDR to find hosts you don't already know about, recording "
@@ -176,7 +234,7 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "cidr": {"type": "string", "description": "e.g. 192.168.1.0/24"},
+                    "cidr": {"type": "string", "description": "e.g. 10.0.0.0/24"},
                 },
                 "required": ["cidr"],
             },
@@ -222,17 +280,33 @@ async def _allowed_networks(databases: Databases) -> list[tuple[int, _Net]]:
     return networks
 
 
-async def _validate_target(databases: Databases, target: str) -> tuple[str, int | None]:
-    """Returns (normalized ip, containing network id or None for loopback)."""
+async def _validate_target(databases: Databases, target: str) -> tuple[str, int | None, bool]:
+    """Returns (normalized ip, containing network id or None, whether it's inside the configured
+    discovery scope). Loopback is always in scope (so the agent can be exercised locally). A
+    private (RFC1918) address outside every configured Network is also allowed - but only when the
+    administrator's allow_undefined_network_scan switch is on, the same policy _validate_scan_cidr
+    already applies to CIDR sweeps. A publicly routable address needs that same switch PLUS the
+    further, explicitly-disclaimed allow_public_targets switch - this is attack surface on someone
+    else's network, not the admin's own, so it is opt-in on top of the private-range relaxation, not
+    instead of it. Either relaxation is reported out of scope so callers can flag it rather than
+    silently treating it as a known device. Deliberately not offered for discover_hosts's CIDR
+    sweeps - a public range is a mass-scanning capability this is not meant to grant."""
     try:
         ip = ipaddress.ip_address(target.strip())
     except ValueError as exc:
         raise AgentToolError(f"target must be a single IP address, got {target!r}") from exc
     if ip.is_loopback:
-        return str(ip), None
+        return str(ip), None, True
     for network_id, net in await _allowed_networks(databases):
         if ip in net:
-            return str(ip), network_id
+            return str(ip), network_id, True
+    async with databases.app_session_factory() as session:
+        settings = await ensure_default_ai_mode_settings(session)
+    if settings.allow_undefined_network_scan:
+        if _is_rfc1918(ip):
+            return str(ip), None, False
+        if settings.allow_public_targets and ip.is_global:
+            return str(ip), None, False
     raise AgentToolError(f"{ip} is not inside any configured network")
 
 
@@ -243,12 +317,37 @@ _RFC1918 = [
 ]
 
 
+def _is_rfc1918(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
+    return isinstance(ip, ipaddress.IPv4Address) and any(ip in block for block in _RFC1918)
+
+
 def _is_subnet_of(net: _Net, other: _Net) -> bool:
     if isinstance(net, ipaddress.IPv4Network) and isinstance(other, ipaddress.IPv4Network):
         return net.subnet_of(other)
     if isinstance(net, ipaddress.IPv6Network) and isinstance(other, ipaddress.IPv6Network):
         return net.subnet_of(other)
     return False
+
+
+def _scope_note(ip: str, in_scope: bool) -> dict[str, Any]:
+    if in_scope:
+        return {}
+    if ipaddress.ip_address(ip).is_global:
+        return {
+            "note": (
+                f"{ip} is a PUBLIC address outside the configured network discovery scope - the "
+                "administrator has explicitly enabled testing public targets. This is attack surface "
+                "on a network that may not be yours; make sure you have authorization, and call this "
+                "out prominently in your report."
+            )
+        }
+    return {
+        "note": (
+            f"{ip} is outside the configured network discovery scope (not inside any configured "
+            "Network) - proceeding anyway since undefined-range scanning is enabled; call this out "
+            "in your report."
+        )
+    }
 
 
 async def _validate_scan_cidr(databases: Databases, cidr: str) -> tuple[_Net, int | None, int]:
@@ -262,7 +361,7 @@ async def _validate_scan_cidr(databases: Databases, cidr: str) -> tuple[_Net, in
         raise AgentToolError(f"cidr must be a valid network, got {cidr!r}") from exc
     for network_id, allowed in await _allowed_networks(databases):
         if _is_subnet_of(net, allowed):
-            if len(list(net.hosts())) > MAX_HOSTS_PER_SCAN:
+            if host_count(net) > MAX_HOSTS_PER_SCAN:
                 raise AgentToolError(f"{cidr} has more than the {MAX_HOSTS_PER_SCAN}-host scan limit")
             return net, network_id, MAX_HOSTS_PER_SCAN
     async with databases.app_session_factory() as session:
@@ -276,7 +375,7 @@ async def _validate_scan_cidr(databases: Databases, cidr: str) -> tuple[_Net, in
         raise AgentToolError(
             f"{cidr} is not inside any configured network and is not a private (RFC1918) range"
         )
-    if len(list(net.hosts())) > settings.undefined_scan_max_hosts:
+    if host_count(net) > settings.undefined_scan_max_hosts:
         raise AgentToolError(
             f"{cidr} has more hosts than the configured {settings.undefined_scan_max_hosts}-host "
             "limit for ranges outside configured networks"
@@ -335,8 +434,9 @@ def _as_flag_list(value: Any) -> list[str]:
     return []
 
 
-async def run_nmap(databases: Databases, arguments: dict[str, Any]) -> Any:
-    ip, _ = await _validate_target(databases, str(arguments.get("target", "")))
+def nmap_argv(ip: str, arguments: dict[str, Any]) -> list[str]:
+    """The exact command run_nmap executes for these arguments; raises AgentToolError for a flag or port
+    list the allowlist refuses. Split out so the Tools page can show a call's command without running it."""
     flags = _as_flag_list(arguments.get("flags"))
     for flag in flags:
         if not _ALLOWED_FLAG.match(flag):
@@ -350,20 +450,26 @@ async def run_nmap(databases: Databases, arguments: dict[str, Any]) -> Any:
         if not _PORTS.match(str(ports)):
             raise AgentToolError("ports must look like 22,80 or 1-1024")
         args += ["-p", str(ports)]
-    result = await _run([*args, ip], NMAP_TIMEOUT_SECONDS)
+    return [*args, ip]
+
+
+async def run_nmap(databases: Databases, arguments: dict[str, Any]) -> Any:
+    ip, _, in_scope = await _validate_target(databases, str(arguments.get("target", "")))
+    argv = nmap_argv(ip, arguments)
+    result = await _run(argv, NMAP_TIMEOUT_SECONDS)
     if "due to host timeout" in str(result.get("output")):
         result["output"] += (
             "\nNOTE: nmap gave up on this host, so this says nothing about which ports are open. "
             "Retry it once with a short port list (for example ports=22,80,443) before reporting it."
         )
+    result.update(_scope_note(ip, in_scope))
     return result
 
 
-async def run_nc(databases: Databases, arguments: dict[str, Any]) -> Any:
-    ip, _ = await _validate_target(databases, str(arguments.get("target", "")))
-    # port is the documented key; ports (run_nmap's plural) is accepted too - a model that just used
-    # run_nmap naturally reaches for the same key name on this sibling tool, and nc only ever dials one
-    # port, so a comma-separated value takes its first entry.
+def nc_port(arguments: dict[str, Any]) -> int:
+    """The port run_nc would dial. port is the documented key; ports (run_nmap's plural) is accepted too - a
+    model that just used run_nmap naturally reaches for the same key name on this sibling tool, and nc only
+    ever dials one port, so a comma-separated value takes its first entry."""
     raw_port = arguments.get("port", arguments.get("ports"))
     try:
         port = int(str(raw_port).split(",")[0].strip())
@@ -371,11 +477,20 @@ async def run_nc(databases: Databases, arguments: dict[str, Any]) -> Any:
         raise AgentToolError("port (or ports) must be an integer, e.g. 22") from exc
     if not 1 <= port <= 65535:
         raise AgentToolError("port out of range")
+    return port
+
+
+async def run_nc(databases: Databases, arguments: dict[str, Any]) -> Any:
+    ip, _, in_scope = await _validate_target(databases, str(arguments.get("target", "")))
+    port = nc_port(arguments)
     payload = arguments.get("payload")
     stdin = str(payload)[:256].encode() if payload else b""
     if arguments.get("tls"):
-        return await _run_nc_tls(ip, port, stdin)
-    return await _run(["nc", "-n", "-w", "3", ip, str(port)], NC_TIMEOUT_SECONDS, stdin=stdin)
+        result = await _run_nc_tls(ip, port, stdin)
+    else:
+        result = await _run(["nc", "-n", "-w", "3", ip, str(port)], NC_TIMEOUT_SECONDS, stdin=stdin)
+    result.update(_scope_note(ip, in_scope))
+    return result
 
 
 async def _run_nc_tls(ip: str, port: int, stdin: bytes) -> dict[str, Any]:
@@ -412,7 +527,7 @@ async def _run_nc_tls(ip: str, port: int, stdin: bytes) -> dict[str, Any]:
 
 
 async def record_service(databases: Databases, arguments: dict[str, Any]) -> Any:
-    ip, network_id = await _validate_target(databases, str(arguments.get("ip", "")))
+    ip, network_id, in_scope = await _validate_target(databases, str(arguments.get("ip", "")))
     try:
         port = int(arguments["port"])
         service_type = ServiceType(str(arguments["service_type"]))
@@ -423,17 +538,17 @@ async def record_service(databases: Databases, arguments: dict[str, Any]) -> Any
 
     async with databases.app_session_factory() as session:
         device_id = (
-            await session.execute(select(DeviceAddress.device_id).where(DeviceAddress.ip_address == ip))
-        ).scalars().first()
+            (await session.execute(select(DeviceAddress.device_id).where(DeviceAddress.ip_address == ip)))
+            .scalars()
+            .first()
+        )
     if device_id is None:
         device_id = await DiscoveryService(databases).record_device_observation(
             network_id=network_id, ip=ip, mac=None, hostname=None, open_ports=[port], via="ai_mode"
         )
 
     fingerprint = {
-        key: str(arguments[key])
-        for key in ("name", "product", "version", "notes")
-        if arguments.get(key)
+        key: str(arguments[key]) for key in ("name", "product", "version", "notes") if arguments.get(key)
     }
     fingerprint["source"] = "ai"
     service_id = await DiscoveredServiceStore(databases).upsert(
@@ -444,16 +559,57 @@ async def record_service(databases: Databases, arguments: dict[str, Any]) -> Any
         source="ai",
         fingerprint=fingerprint,
     )
-    return {"recorded": True, "service_id": service_id}
+    return {"recorded": True, "service_id": service_id, **_scope_note(ip, in_scope)}
 
 
 async def report_open_ports(databases: Databases, arguments: dict[str, Any]) -> Any:
-    ip, _ = await _validate_target(databases, str(arguments.get("ip", "")))
+    ip, _, in_scope = await _validate_target(databases, str(arguments.get("ip", "")))
     try:
         ports = [int(p) for p in arguments["ports"]]
     except (KeyError, TypeError, ValueError) as exc:
         raise AgentToolError("ports (a list of integers) is required") from exc
-    return {"reported": True, "ip": ip, "ports": ports}
+    return {"reported": True, "ip": ip, "ports": ports, **_scope_note(ip, in_scope)}
+
+
+async def record_finding(
+    databases: Databases,
+    arguments: dict[str, Any],
+    *,
+    agent_name: str | None = None,
+    run_id: int | None = None,
+) -> Any:
+    ip, _, in_scope = await _validate_target(databases, str(arguments.get("ip", "")))
+    kind = str(arguments.get("kind") or "").lower()
+    severity = str(arguments.get("severity") or "info").lower()
+    title = str(arguments.get("title") or "").strip()[:200]
+    if kind not in FINDING_KINDS:
+        raise AgentToolError(f"kind must be one of: {', '.join(FINDING_KINDS)}")
+    if severity not in FINDING_SEVERITIES:
+        raise AgentToolError(f"severity must be one of: {', '.join(FINDING_SEVERITIES)}")
+    if not title:
+        raise AgentToolError("title is required")
+    detail = str(arguments.get("detail") or "").strip()[:2000]
+    async with databases.app_session_factory() as session:
+        device_id = await session.scalar(select(Device.id).where(Device.primary_ip == ip).limit(1))
+        existing = await session.scalar(
+            select(HostFinding).where(
+                HostFinding.ip == ip,
+                HostFinding.kind == kind,
+                HostFinding.title == title,
+                HostFinding.run_id.is_(None) if run_id is None else HostFinding.run_id == run_id,
+            )
+        )
+        if existing is None:
+            session.add(
+                HostFinding(
+                    run_id=run_id, device_id=device_id, ip=ip, kind=kind, severity=severity,
+                    title=title, detail=detail, source=agent_name or "",
+                )
+            )
+        else:
+            existing.severity, existing.detail, existing.observed_at = severity, detail, utcnow()
+        await session.commit()
+    return {"recorded": True, "ip": ip, "kind": kind, **_scope_note(ip, in_scope)}
 
 
 async def publish_message(databases: Databases, arguments: dict[str, Any]) -> Any:
@@ -514,7 +670,9 @@ TOOL_SCHEMAS.extend(
                 "name": "save_report",
                 "description": (
                     "Save a finished report. It appears on the Reports page, can be downloaded as PDF and "
-                    "is sent to Telegram. content is Markdown (headings, bullets, pipe tables)."
+                    "is sent to Telegram. content is Markdown (headings, bullets, pipe tables). Do not sign "
+                    "or attribute the report yourself (no 'Generated by ...' line, whether to yourself or "
+                    "to a tool you used) - the platform already records and displays which agent wrote it."
                 ),
                 "parameters": {
                     "type": "object",
@@ -556,7 +714,10 @@ async def get_status_delta(databases: Databases, arguments: dict[str, Any]) -> A
         current["devices"] = [d for d in current["devices"] if d["ip"] in wanted]
     async with databases.app_session_factory() as session:
         previous_report = await session.scalar(
-            select(Report).where(Report.snapshot.is_not(None)).order_by(Report.id.desc()).limit(1)
+            select(Report)
+            .where(Report.snapshot.is_not(None), Report.scope.is_(None))
+            .order_by(Report.id.desc())
+            .limit(1)
         )
     if previous_report is None or previous_report.snapshot is None:
         return {"current": current, "previous": None, "delta": None}
@@ -579,21 +740,88 @@ async def get_status_delta(databases: Databases, arguments: dict[str, Any]) -> A
 _MARKDOWN_HEADING = re.compile(r"^#{1,6}\s*")
 
 
-async def save_report(databases: Databases, arguments: dict[str, Any]) -> Any:
+async def save_report(
+    databases: Databases, arguments: dict[str, Any], *, agent_name: str | None = None
+) -> Any:
     # A model sometimes passes its own markdown heading as the plain-text title; strip it rather than
     # show "## Investigation Report: ..." literally on the Reports list.
     title = _MARKDOWN_HEADING.sub("", str(arguments.get("title") or "").strip()).strip()
     content = str(arguments.get("content") or "").strip()
     if not title or not content:
         raise AgentToolError("title and content are required")
+    source = f"agent:{agent_name}" if agent_name else "agent"
     snapshot = await build_snapshot(databases)
     async with databases.app_session_factory() as session:
-        report = Report(title=title[:200], content=content, source="agent", snapshot=snapshot)
+        report = Report(title=title[:200], content=content, source=source, snapshot=snapshot)
         session.add(report)
         await session.commit()
         report_id = report.id
     notify_report_saved(databases, report_id)
     return {"saved": True, "report_id": report_id}
+
+
+async def remember(databases: Databases, arguments: dict[str, Any], *, agent_name: str | None = None) -> Any:
+    """Save a short note for this agent's own future runs. Pruned to the most recent entries per
+    the effective cap (AiModeSettings default, or this agent's own override); visible and
+    deletable by the human on the Agents page."""
+    note = str(arguments.get("note") or "").strip()
+    if not note:
+        raise AgentToolError("note is required")
+    if not agent_name:
+        raise AgentToolError("remember has no agent to save this for")
+    async with databases.app_session_factory() as session:
+        max_entries, max_chars, _ = await effective_memory_limits(session, agent_name)
+        content = note[:max_chars]
+        session.add(AiAgentMemory(agent_name=agent_name, content=content))
+        await session.flush()
+        stale = (
+            (
+                await session.execute(
+                    select(AiAgentMemory.id)
+                    .where(AiAgentMemory.agent_name == agent_name)
+                    .order_by(AiAgentMemory.created_at.desc(), AiAgentMemory.id.desc())
+                    .offset(max_entries)
+                )
+            )
+            .scalars()
+            .all()
+        )
+        if stale:
+            await session.execute(delete(AiAgentMemory).where(AiAgentMemory.id.in_(stale)))
+        await session.commit()
+    return {"saved": True, "note": content}
+
+
+async def search_knowledge(databases: Databases, arguments: dict[str, Any]) -> Any:
+    collection = str(arguments.get("collection") or "").strip()
+    query = str(arguments.get("query") or "").strip()
+    if not collection or not query:
+        raise AgentToolError("collection and query are required")
+    try:
+        top_k = max(1, min(int(arguments.get("top_k") or 5), 20))
+    except (TypeError, ValueError) as exc:
+        raise AgentToolError("top_k must be a whole number") from exc
+    return await knowledge_service.search(databases, collection_name=collection, query=query, top_k=top_k)
+
+
+async def add_knowledge_entry(
+    databases: Databases, arguments: dict[str, Any], *, agent_name: str | None = None
+) -> Any:
+    collection = str(arguments.get("collection") or "").strip()
+    title = str(arguments.get("title") or "").strip()
+    content = str(arguments.get("content") or "").strip()
+    if not collection or not title or not content:
+        raise AgentToolError("collection, title and content are required")
+    source = f"agent:{agent_name}" if agent_name else "agent"
+    entries = await knowledge_service.add_entry(
+        databases,
+        collection_name=collection,
+        title=title,
+        content=content,
+        source=source,
+        create_collection_if_missing=False,
+    )
+    return {"saved": True, "entry_ids": [e.id for e in entries]}
 
 
 TOOL_SCHEMAS.extend(_INSPECT_SCHEMAS)
@@ -636,11 +864,12 @@ TOOL_SCHEMAS.extend(
             "function": {
                 "name": "submit_http_form",
                 "description": (
-                    "Submit an HTML form to a host on the monitored LAN: GET (query string) or POST "
-                    "(form-encoded body). Only targets inside a configured Network or loopback are "
-                    "allowed, same as run_nmap/run_nc. Use this to test login forms, search boxes or "
-                    "other form-based endpoints you find while inspecting a web service. Certificates "
-                    "are not validated (home services often self-sign)."
+                    "Make an HTTP request to a host on the monitored LAN - a curl equivalent. GET, POST, "
+                    "PUT, PATCH, DELETE or HEAD; a GET's fields become its query string, a POST/PUT/PATCH's "
+                    "fields become a form-encoded body. For a raw body (e.g. JSON) use body instead of "
+                    "fields and set Content-Type via headers - fields and body are mutually exclusive. Only "
+                    "targets inside a configured Network or loopback are allowed, same as run_nmap/run_nc. "
+                    "Certificates are not validated (home services often self-sign)."
                 ),
                 "parameters": {
                     "type": "object",
@@ -648,16 +877,90 @@ TOOL_SCHEMAS.extend(
                         "target": {"type": "string", "description": "A single IPv4 or IPv6 address"},
                         "port": {"type": "integer"},
                         "path": {"type": "string", "description": "e.g. /login (default /)"},
-                        "method": {"type": "string", "enum": ["GET", "POST"]},
+                        "method": {
+                            "type": "string",
+                            "enum": ["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD"],
+                        },
                         "fields": {
                             "type": "object",
                             "description": 'Form field name/value pairs, e.g. {"username": "admin"}',
+                        },
+                        "body": {
+                            "type": "string",
+                            "description": "Raw request body (e.g. JSON text), instead of fields",
                         },
                         "headers": {"type": "object", "description": "Optional extra request headers"},
                         "tls": {"type": "boolean", "description": "Use https instead of http"},
                         "follow_redirects": {"type": "boolean"},
                     },
-                    "required": ["target", "port", "method", "fields"],
+                    "required": ["target", "port", "method"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "remember",
+                "description": (
+                    "Save a short note for your own future runs, e.g. a fact worth not "
+                    "re-discovering or re-flagging next time. Visible to you on every future run "
+                    "and manageable (viewable, deletable) by the human on your Agents page."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "note": {
+                            "type": "string",
+                            "description": "One short fact or finding, kept brief.",
+                        }
+                    },
+                    "required": ["note"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "search_knowledge",
+                "description": (
+                    "Search a knowledge collection by meaning, not exact words. Returns the most "
+                    "relevant entries with a similarity score, most relevant first. Refuses if the "
+                    "knowledge base is turned off (Settings), or if the collection name doesn't exist."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "collection": {
+                            "type": "string",
+                            "description": "An existing collection's exact name",
+                        },
+                        "query": {"type": "string"},
+                        "top_k": {"type": "integer", "description": "1-20, default 5"},
+                    },
+                    "required": ["collection", "query"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "add_knowledge_entry",
+                "description": (
+                    "Save a finding into an existing knowledge collection, for anyone (including "
+                    "yourself later) to find by search_knowledge. Never creates a new collection - "
+                    "the collection must already exist, by its exact name."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "collection": {
+                            "type": "string",
+                            "description": "An existing collection's exact name",
+                        },
+                        "title": {"type": "string"},
+                        "content": {"type": "string"},
+                    },
+                    "required": ["collection", "title", "content"],
                 },
             },
         },
@@ -717,18 +1020,28 @@ async def fetch_url(databases: Databases, arguments: dict[str, Any]) -> Any:
 _FORM_HIDDEN_HEADERS = {"set-cookie", "authorization", "proxy-authorization"}
 
 
+_HTTP_METHODS = ("GET", "POST", "PUT", "PATCH", "DELETE", "HEAD")
+
+
 async def submit_http_form(databases: Databases, arguments: dict[str, Any]) -> Any:
-    ip, _ = await _validate_target(databases, str(arguments.get("target", "")))
+    ip, _, in_scope = await _validate_target(databases, str(arguments.get("target", "")))
     try:
         port = int(arguments["port"])
     except (KeyError, TypeError, ValueError) as exc:
         raise AgentToolError("port must be an integer") from exc
     method = str(arguments.get("method", "")).upper()
-    if method not in ("GET", "POST"):
-        raise AgentToolError("method must be GET or POST")
+    if method not in _HTTP_METHODS:
+        raise AgentToolError(f"method must be one of {', '.join(_HTTP_METHODS)}")
     fields = arguments.get("fields")
-    if not isinstance(fields, dict):
+    if fields is not None and not isinstance(fields, dict):
         raise AgentToolError("fields must be an object of field name/value pairs")
+    body = arguments.get("body")
+    if body is not None and not isinstance(body, str):
+        raise AgentToolError("body must be a string")
+    if fields and body is not None:
+        raise AgentToolError(
+            "fields and body are mutually exclusive - use fields for a form, body for raw content"
+        )
     path = str(arguments.get("path") or "/")
     if not path.startswith("/"):
         path = "/" + path
@@ -740,15 +1053,16 @@ async def submit_http_form(databases: Databases, arguments: dict[str, Any]) -> A
         raise AgentToolError("headers must be an object")
     headers = {k: str(v) for k, v in raw_headers.items() if isinstance(k, str)}
     follow = bool(arguments.get("follow_redirects"))
+    params = fields if method == "GET" and fields else None
+    data = fields if method != "GET" and fields else None
 
     try:
         async with httpx.AsyncClient(
             verify=False, timeout=FORM_SUBMIT_TIMEOUT_SECONDS, follow_redirects=follow
         ) as client:
-            if method == "GET":
-                response = await client.get(url, params=fields, headers=headers)
-            else:
-                response = await client.post(url, data=fields, headers=headers)
+            response = await client.request(
+                method, url, params=params, data=data, content=body, headers=headers
+            )
     except httpx.HTTPError as exc:
         raise AgentToolError(f"form submission failed: {type(exc).__name__}: {exc}") from exc
 
@@ -757,6 +1071,7 @@ async def submit_http_form(databases: Databases, arguments: dict[str, Any]) -> A
         "status": response.status_code,
         "headers": {k: v for k, v in response.headers.items() if k.lower() not in _FORM_HIDDEN_HEADERS},
         "body": _truncate(response.text),
+        **_scope_note(ip, in_scope),
     }
 
 
@@ -765,6 +1080,7 @@ _HANDLERS = {
     "run_nc": run_nc,
     "record_service": record_service,
     "report_open_ports": report_open_ports,
+    "record_finding": record_finding,
     "discover_hosts": discover_hosts,
     "publish_message": publish_message,
     "get_network_snapshot": get_network_snapshot,
@@ -773,6 +1089,9 @@ _HANDLERS = {
     "web_search": web_search,
     "fetch_url": fetch_url,
     "submit_http_form": submit_http_form,
+    "remember": remember,
+    "search_knowledge": search_knowledge,
+    "add_knowledge_entry": add_knowledge_entry,
     **_INSPECT_HANDLERS,
     "virustotal_lookup": virustotal_lookup,
 }
@@ -780,6 +1099,7 @@ _HANDLERS = {
 
 ALL_TOOL_NAMES = list(_HANDLERS)
 WEB_TOOL_NAMES = frozenset({"web_search", "fetch_url", "virustotal_lookup"})
+KNOWLEDGE_TOOL_NAMES = frozenset({"search_knowledge", "add_knowledge_entry"})
 
 
 def schemas_for(enabled: list[str]) -> list[dict[str, Any]]:
@@ -793,6 +1113,8 @@ async def dispatch(
     *,
     enabled: list[str] | None = None,
     dry_run: bool = False,
+    agent_name: str | None = None,
+    run_id: int | None = None,
 ) -> Any:
     handler = _HANDLERS.get(name)
     if handler is None or (enabled is not None and name not in enabled):
@@ -801,10 +1123,16 @@ async def dispatch(
         async with databases.app_session_factory() as session:
             if (await ensure_default_discovery_settings(session)).agent_internet_blocked:
                 raise AgentToolError("internet access is blocked by the administrator's kill switch")
+    if name in KNOWLEDGE_TOOL_NAMES:
+        async with databases.app_session_factory() as session:
+            if not (await ensure_default_ai_mode_settings(session)).knowledge_base_enabled:
+                raise AgentToolError("the knowledge base is turned off (AI Settings)")
     if dry_run and name == "record_service":
         return {"recorded": False, "dry_run": True, "would_record": arguments}
     if dry_run and name == "report_open_ports":
         return {"reported": False, "dry_run": True, "would_report": arguments}
+    if dry_run and name == "record_finding":
+        return {"recorded": False, "dry_run": True, "would_record": arguments}
     if dry_run and name == "discover_hosts":
         return {"scanned": False, "dry_run": True, "would_scan": arguments.get("cidr")}
     if dry_run and name in MUTATING_TOOLS:
@@ -813,4 +1141,18 @@ async def dispatch(
         return {"saved": False, "dry_run": True}
     if dry_run and name == "submit_http_form":
         return {"submitted": False, "dry_run": True, "would_submit": arguments}
+    if dry_run and name == "remember":
+        return {"saved": False, "dry_run": True, "note": str(arguments.get("note") or "")}
+    if dry_run and name == "add_knowledge_entry":
+        return {"saved": False, "dry_run": True}
+    if name == "remember":
+        return await remember(databases, arguments, agent_name=agent_name)
+    if name == "record_finding":
+        return await record_finding(databases, arguments, agent_name=agent_name, run_id=run_id)
+    if name == "save_report":
+        return await save_report(databases, arguments, agent_name=agent_name)
+    if name == "add_knowledge_entry":
+        return await add_knowledge_entry(databases, arguments, agent_name=agent_name)
+    if name in INSPECT_TOOL_NAMES:
+        return await _INSPECT_HANDLERS[name](databases, arguments, agent_name=agent_name)
     return await handler(databases, arguments)

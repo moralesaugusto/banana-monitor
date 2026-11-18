@@ -14,8 +14,12 @@ from app.discovery.oui import get_oui_registry
 from app.discovery.scan_status import get_scan_status_registry
 from app.domain.metrics_models import MetricsBase
 from app.domain.models import Base as AppBase
+from app.knowledge.models import KnowledgeBase
+from app.knowledge.qdrant_store import get_qdrant_client
+from app.llm import credential_pool
 from app.llm.bus import get_message_bus
 from app.llm.orchestrator import _contexts
+from app.llm.tool_availability import _mcp_cache
 from app.metrics.writer import get_metrics_writer
 from app.scheduler.supervisor import get_supervisor
 from app.selfhealth.monitor import get_self_health_monitor
@@ -43,6 +47,9 @@ def _isolated_settings(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
     get_oui_registry.cache_clear()
     get_scan_status_registry.cache_clear()
     get_message_bus.cache_clear()
+    get_qdrant_client.cache_clear()
+    credential_pool.clear_memory()  # remembered per host+credential; a previous test's host must not leak
+    _mcp_cache.clear()  # keyed by URL, so a previous test's answer would leak into the next
     _contexts.clear()  # run ids restart per test database; a leftover context would look like a live run
 
 
@@ -58,6 +65,8 @@ async def _make_app_and_databases():  # noqa: ANN202
         await conn.run_sync(MetricsBase.metadata.create_all)
     async with databases.credentials_engine.begin() as conn:
         await conn.run_sync(CredentialsBase.metadata.create_all)
+    async with databases.knowledge_engine.begin() as conn:
+        await conn.run_sync(KnowledgeBase.metadata.create_all)
     return app, databases
 
 

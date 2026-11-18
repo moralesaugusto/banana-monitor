@@ -76,6 +76,24 @@ async def test_command_tool_runs_without_shell_and_obeys_guardrails(client: Asyn
 
 
 @pytest.mark.asyncio
+async def test_command_tool_flags_a_private_target_outside_any_network_once_enabled(
+    client: AsyncClient,
+) -> None:
+    """A custom (e.g. tajonaso) tool must not be stopped cold by a target outside every configured
+    Network once undefined-range scanning is enabled - it should run and the result should call the
+    target out as out of scope, the same as a built-in tool does."""
+    settings = await client.put("/api/ai-mode/settings", json={"allow_undefined_network_scan": True})
+    assert settings.status_code == 200
+
+    tool = AiCustomTool(**COMMAND_TOOL, parameters={})
+    databases = get_databases()
+    with patch.object(custom_tools, "_run", AsyncMock(return_value={"exit_code": 0, "output": "ok"})):
+        result = await custom_tools.run_custom_tool(databases, tool, [], {"target": "10.0.0.5"})
+    assert result["output"] == "ok"
+    assert "outside" in result["note"] and "10.0.0.5" in result["note"]
+
+
+@pytest.mark.asyncio
 async def test_agents_are_seeded_and_validated(client: AsyncClient) -> None:
     agents = (await client.get("/api/ai-mode/agents")).json()
     assert [a["name"] for a in agents] == [
@@ -96,6 +114,103 @@ async def test_agents_are_seeded_and_validated(client: AsyncClient) -> None:
     updated = await client.put(f"/api/ai-mode/agents/{agent_id}", json={**body, "require_approval": "both"})
     assert updated.json()["require_approval"] == "both"
     assert (await client.delete(f"/api/ai-mode/agents/{agent_id}")).status_code == 204
+
+
+@pytest.mark.asyncio
+async def test_agent_memory_list_delete_and_clear_over_the_api(client: AsyncClient) -> None:
+    from app.db.session import get_databases
+    from app.domain.models import AiAgentMemory
+
+    agents = {a["name"]: a["id"] for a in (await client.get("/api/ai-mode/agents")).json()}
+    bellaco_id = agents["bellaco"]
+
+    assert (await client.get(f"/api/ai-mode/agents/{bellaco_id}/memory")).json() == []
+
+    databases = get_databases()
+    async with databases.app_session_factory() as session:
+        session.add_all(
+            [
+                AiAgentMemory(agent_name="bellaco", content="first note"),
+                AiAgentMemory(agent_name="bellaco", content="second note"),
+                AiAgentMemory(agent_name="discoverer", content="not bellaco's"),
+            ]
+        )
+        await session.commit()
+
+    entries = (await client.get(f"/api/ai-mode/agents/{bellaco_id}/memory")).json()
+    assert [e["content"] for e in entries] == ["second note", "first note"]  # newest first
+
+    by_name = {a["name"]: a["memory_count"] for a in (await client.get("/api/ai-mode/agents")).json()}
+    assert by_name["bellaco"] == 2 and by_name["discoverer"] == 1 and by_name["reporter"] == 0
+
+    other_id = agents["discoverer"]
+    first_entry_id = entries[0]["id"]
+    deleted = await client.delete(f"/api/ai-mode/agents/{bellaco_id}/memory/{first_entry_id}")
+    assert deleted.status_code == 204
+    assert (await client.delete(f"/api/ai-mode/agents/{bellaco_id}/memory/999")).status_code == 404
+    # deleting through the wrong agent's path is refused, not silently cross-agent
+    other_entries = (await client.get(f"/api/ai-mode/agents/{other_id}/memory")).json()
+    assert (
+        await client.delete(f"/api/ai-mode/agents/{bellaco_id}/memory/{other_entries[0]['id']}")
+    ).status_code == 404
+
+    remaining = (await client.get(f"/api/ai-mode/agents/{bellaco_id}/memory")).json()
+    assert [e["content"] for e in remaining] == ["first note"]
+
+    assert (await client.delete(f"/api/ai-mode/agents/{bellaco_id}/memory")).status_code == 204
+    assert (await client.get(f"/api/ai-mode/agents/{bellaco_id}/memory")).json() == []
+    assert (await client.get(f"/api/ai-mode/agents/{other_id}/memory")).json() != []  # untouched
+
+
+@pytest.mark.asyncio
+async def test_clear_all_agent_memory_wipes_every_agent_at_once(client: AsyncClient) -> None:
+    from app.db.session import get_databases
+    from app.domain.models import AiAgentMemory
+
+    databases = get_databases()
+    async with databases.app_session_factory() as session:
+        session.add_all(
+            [
+                AiAgentMemory(agent_name="bellaco", content="bellaco's note"),
+                AiAgentMemory(agent_name="sinverguenza", content="sinverguenza's note"),
+            ]
+        )
+        await session.commit()
+
+    agents = {a["name"]: a["id"] for a in (await client.get("/api/ai-mode/agents")).json()}
+    assert (await client.get(f"/api/ai-mode/agents/{agents['bellaco']}/memory")).json() != []
+    assert (await client.get(f"/api/ai-mode/agents/{agents['sinverguenza']}/memory")).json() != []
+
+    assert (await client.delete("/api/ai-mode/memory")).status_code == 204
+
+    assert (await client.get(f"/api/ai-mode/agents/{agents['bellaco']}/memory")).json() == []
+    assert (await client.get(f"/api/ai-mode/agents/{agents['sinverguenza']}/memory")).json() == []
+    by_name = {a["name"]: a["memory_count"] for a in (await client.get("/api/ai-mode/agents")).json()}
+    assert all(count == 0 for count in by_name.values())
+
+
+@pytest.mark.asyncio
+async def test_deleting_an_agent_also_clears_its_memory(client: AsyncClient) -> None:
+    from app.db.session import get_databases
+    from app.domain.models import AiAgentMemory
+
+    body = {"name": "summarizer", "subscribes": ["result.#"], "enabled_tools": ["publish_message"]}
+    created = await client.post("/api/ai-mode/agents", json=body)
+    agent_id = created.json()["id"]
+
+    databases = get_databases()
+    async with databases.app_session_factory() as session:
+        session.add(AiAgentMemory(agent_name="summarizer", content="a note"))
+        await session.commit()
+
+    assert (await client.delete(f"/api/ai-mode/agents/{agent_id}")).status_code == 204
+    async with databases.app_session_factory() as session:
+        from sqlalchemy import select
+
+        rows = (
+            await session.scalars(select(AiAgentMemory).where(AiAgentMemory.agent_name == "summarizer"))
+        ).all()
+    assert rows == []
 
 
 @pytest.mark.asyncio
@@ -170,6 +285,27 @@ async def test_agent_can_use_its_own_ollama_host_and_models_can_be_listed(
     listed = await client.get("/api/ai-mode/ollama-models", params={"base_url": "http://10.0.0.9:11434/v1"})
     assert listed.json()["models"] == ["a", "b"]
     assert (await client.get("/api/ai-mode/ollama-models", params={"base_url": "nope"})).status_code == 422
+
+    # An empty base_url with provider=openrouter must resolve to OpenRouter's real endpoint, not
+    # the AI Mode default's host (Ollama's localhost on a fresh install) - this used to send
+    # "Load models" at localhost for an OpenRouter agent regardless of what was actually selected.
+    async def fake_get_openrouter(self: httpx.AsyncClient, url: str, **kwargs: object) -> httpx.Response:
+        if not str(url).startswith("https://openrouter.ai"):
+            return await original(self, url, **kwargs)  # type: ignore[arg-type]
+        assert url == "https://openrouter.ai/api/v1/models"
+        payload = {"data": [{"id": "anthropic/claude-3.5-sonnet"}]}
+        return httpx.Response(200, json=payload, request=httpx.Request("GET", url))
+
+    monkeypatch.setattr(httpx.AsyncClient, "get", fake_get_openrouter)
+    params = {"base_url": "", "provider": "openrouter"}
+    via_openrouter = await client.get("/api/ai-mode/ollama-models", params=params)
+    assert via_openrouter.json() == {
+        "base_url": "https://openrouter.ai/api/v1",
+        "models": ["anthropic/claude-3.5-sonnet"],
+    }
+    assert (
+        await client.get("/api/ai-mode/ollama-models", params={"provider": "bogus"})
+    ).status_code == 422
 
 
 @pytest.mark.asyncio
@@ -411,3 +547,59 @@ async def test_a_stored_tool_that_predates_the_policy_is_refused_at_run_time() -
     tool = AiCustomTool(name="old", description="x", kind="command", command=command, parameters={})
     with pytest.raises(AgentToolError, match="not allowed"):
         await custom_tools.run_custom_tool(get_databases(), tool, [], {"target": "127.0.0.1"})
+
+
+async def test_a_guardrail_defaults_to_the_old_scope_and_can_cover_every_tool(client: AsyncClient) -> None:
+    rule = {"name": "g", "kind": "deny_regex", "pattern": "x"}
+    created = (await client.post("/api/ai-mode/guardrails", json=rule)).json()
+    assert created["applies_to"] == "default"
+
+    widened = await client.put(f"/api/ai-mode/guardrails/{created['id']}", json={**rule, "applies_to": "all"})
+    assert widened.json()["applies_to"] == "all"
+    invalid = await client.post("/api/ai-mode/guardrails", json={**rule, "applies_to": "nope"})
+    assert invalid.status_code == 422
+
+
+async def test_testing_one_custom_tool_actually_calls_it_against_loopback(
+    client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def fake_run(args: list[str], timeout: float, stdin: bytes | None = None) -> dict:
+        return {"exit_code": 0, "output": "ok"}
+
+    monkeypatch.setattr(custom_tools, "_run", fake_run)
+    created = (await client.post("/api/ai-mode/custom-tools", json=COMMAND_TOOL)).json()
+
+    response = await client.post(f"/api/ai-mode/custom-tools/{created['id']}/test")
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["ok"] is True and body["name"] == COMMAND_TOOL["name"]
+    assert body["arguments_used"] == {"target": "127.0.0.1"}
+    assert (await client.post("/api/ai-mode/custom-tools/999999/test")).status_code == 404
+
+
+async def test_testing_all_custom_tools_covers_every_enabled_one_and_reports_each_problem(
+    client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls: list[list[str]] = []
+
+    async def fake_run(args: list[str], timeout: float, stdin: bytes | None = None) -> dict:
+        calls.append(args)
+        if args[0] == "nc":
+            raise AgentToolError("nc is not installed")
+        return {"exit_code": 0, "output": "ok"}
+
+    monkeypatch.setattr(custom_tools, "_run", fake_run)
+    working = {**COMMAND_TOOL, "name": "good_tool", "command": ["nmap", "{target}"]}
+    broken = {**COMMAND_TOOL, "name": "broken_tool", "command": ["nc", "{target}"]}
+    disabled = {**COMMAND_TOOL, "name": "disabled_tool", "command": ["dig", "{target}"], "enabled": False}
+    for tool in (working, broken, disabled):
+        assert (await client.post("/api/ai-mode/custom-tools", json=tool)).status_code == 201
+
+    results = (await client.post("/api/ai-mode/custom-tools/test-all")).json()
+
+    by_name = {r["name"]: r for r in results}
+    assert set(by_name) == {"good_tool", "broken_tool"}  # the disabled one is skipped
+    assert by_name["good_tool"]["ok"] is True
+    assert by_name["broken_tool"]["ok"] is False and "nc is not installed" in by_name["broken_tool"]["detail"]
+    assert {tuple(c) for c in calls} == {("nmap", "127.0.0.1"), ("nc", "127.0.0.1")}

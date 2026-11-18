@@ -1,5 +1,5 @@
 from fastapi import APIRouter, HTTPException
-from sqlalchemy import select
+from sqlalchemy import delete, select
 
 from app.api.deps import AppSession
 from app.api.schemas.alerts import (
@@ -50,6 +50,9 @@ async def update_rule(rule_id: int, payload: AlertRuleUpdate, session: AppSessio
 @router.delete("/rules/{rule_id}", status_code=204)
 async def delete_rule(rule_id: int, session: AppSession) -> None:
     rule = await _get_rule_or_404(session, rule_id)
+    state_ids = select(AlertStateRow.id).where(AlertStateRow.alert_rule_id == rule_id)
+    await session.execute(delete(AlertEvent).where(AlertEvent.alert_state_id.in_(state_ids)))
+    await session.execute(delete(AlertStateRow).where(AlertStateRow.alert_rule_id == rule_id))
     await session.delete(rule)
     await session.commit()
 

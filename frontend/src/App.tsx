@@ -18,11 +18,16 @@ import { BusPage } from './routes/ai/BusPage'
 import { WorkflowPage } from './routes/ai/WorkflowPage'
 import { AiToolsPage } from './routes/ai/AiToolsPage'
 import { AiTracePage } from './routes/ai/AiTracePage'
+import { KnowledgeBrowsePage } from './routes/ai/KnowledgeBrowsePage'
+import { KnowledgeLearnPage } from './routes/ai/KnowledgeLearnPage'
+import { KnowledgeMapPage } from './routes/ai/KnowledgeMapPage'
+import { KnowledgeSettingsPage } from './routes/ai/KnowledgeSettingsPage'
 import { AlertsPage } from './routes/AlertsPage'
 import { DeviceDetailPage } from './routes/DeviceDetailPage'
 import { DevicesPage } from './routes/DevicesPage'
 import { DiscoveryPage } from './routes/DiscoveryPage'
 import { EventsPage } from './routes/EventsPage'
+import { IntegrationsHub } from './routes/IntegrationsHub'
 import { IntegrationsLearnPage } from './routes/IntegrationsLearnPage'
 import { IntegrationsPage } from './routes/IntegrationsPage'
 import { NetworkGraphPage } from './routes/NetworkGraphPage'
@@ -57,14 +62,20 @@ function App() {
             <Route path="ai/messages" element={<MessagesPage />} />
             <Route path="ai/bus" element={<BusPage />} />
             <Route path="ai/map" element={<AiMapPage />} />
+            <Route path="ai/knowledge" element={<KnowledgeBrowsePage />} />
+            <Route path="ai/knowledge/map" element={<KnowledgeMapPage />} />
+            <Route path="ai/knowledge/settings" element={<KnowledgeSettingsPage />} />
+            <Route path="ai/knowledge/learn" element={<KnowledgeLearnPage />} />
             <Route path="ai/config" element={<AiConfigPage />} />
             <Route path="ai/tools" element={<AiToolsPage />} />
             <Route path="ai/learn" element={<AiLearnPage />} />
             <Route path="alerts" element={<AlertsPage />} />
             <Route path="events" element={<EventsPage />} />
             <Route path="discovery" element={<DiscoveryPage />} />
-            <Route path="integrations" element={<IntegrationsPage />} />
-            <Route path="integrations/credentials" element={<CredentialsPage />} />
+            <Route path="integrations" element={<IntegrationsHub />}>
+              <Route index element={<IntegrationsPage />} />
+              <Route path="credentials" element={<CredentialsPage />} />
+            </Route>
             <Route path="integrations/learn" element={<IntegrationsLearnPage />} />
             <Route path="networks" element={<NetworksPage />} />
             <Route path="networks/:id/map" element={<NetworkMapPage />} />

@@ -82,6 +82,7 @@ describe('IntegrationsPage', () => {
           created_at: new Date().toISOString(),
           rotated_at: null,
           last_used_at: null,
+          used_by: [],
         }
         credentials.push(credential)
         return HttpResponse.json(credential, { status: 201 })
@@ -107,6 +108,7 @@ describe('IntegrationsPage', () => {
 
     const user = userEvent.setup()
     renderPage()
+    await userEvent.setup().click(await screen.findByRole('button', { name: 'New integration' }))
 
     expect(await screen.findByText('No integrations configured yet.')).toBeInTheDocument()
 
@@ -155,6 +157,7 @@ describe('IntegrationsPage', () => {
 
     const user = userEvent.setup()
     renderPage()
+    await userEvent.setup().click(await screen.findByRole('button', { name: 'New integration' }))
 
     expect(await screen.findByText('No integrations configured yet.')).toBeInTheDocument()
 
@@ -207,6 +210,7 @@ describe('IntegrationsPage', () => {
 
     const user = userEvent.setup()
     renderPage()
+    await userEvent.setup().click(await screen.findByRole('button', { name: 'New integration' }))
 
     expect(await screen.findByText('No integrations configured yet.')).toBeInTheDocument()
     await user.selectOptions(screen.getByText('Select…').closest('select')!, 'demo')
@@ -233,6 +237,7 @@ describe('IntegrationsPage', () => {
           created_at: new Date().toISOString(),
           rotated_at: null,
           last_used_at: null,
+          used_by: [],
         }
         return HttpResponse.json(credential, { status: 201 })
       }),
@@ -256,6 +261,7 @@ describe('IntegrationsPage', () => {
 
     const user = userEvent.setup()
     renderPage()
+    await userEvent.setup().click(await screen.findByRole('button', { name: 'New integration' }))
 
     expect(await screen.findByText('No integrations configured yet.')).toBeInTheDocument()
     await user.type(screen.getByPlaceholderText('proxmox'), 'generic_ssh')
@@ -299,7 +305,7 @@ describe('IntegrationsPage', () => {
     renderPage()
 
     expect(await screen.findByText('ssh-wallet')).toBeInTheDocument()
-    expect(screen.getByText('Wallet')).toBeInTheDocument()
+    expect(screen.getByText('Any discovered host')).toBeInTheDocument()
   })
 
   it('toggles an integration enabled/disabled without deleting it', async () => {
@@ -357,6 +363,7 @@ describe('IntegrationsPage', () => {
           created_at: new Date().toISOString(),
           rotated_at: null,
           last_used_at: null,
+          used_by: [],
         }
         return HttpResponse.json(credential, { status: 201 })
       }),
@@ -380,6 +387,7 @@ describe('IntegrationsPage', () => {
 
     const user = userEvent.setup()
     renderPage()
+    await userEvent.setup().click(await screen.findByRole('button', { name: 'New integration' }))
 
     expect(await screen.findByText('No integrations configured yet.')).toBeInTheDocument()
     await user.selectOptions(screen.getByText('Select…').closest('select')!, 'generic_ssh')
@@ -413,6 +421,7 @@ describe('IntegrationsPage', () => {
     )
 
     renderPage()
+    await userEvent.setup().click(await screen.findByRole('button', { name: 'New integration' }))
 
     expect(await screen.findByText('No integrations configured yet.')).toBeInTheDocument()
     await userEvent.setup().selectOptions(screen.getByText('Select…').closest('select')!, 'generic_ssh')
@@ -440,5 +449,45 @@ describe('IntegrationsPage', () => {
     expect(await screen.findByText('No integrations configured yet.')).toBeInTheDocument()
     expect(await screen.findByRole('textbox', { name: /Host/ })).toHaveValue('10.0.0.5')
     expect(screen.getByRole('spinbutton', { name: /Port/ })).toHaveValue(1234)
+  })
+
+  it('edits an integration in place and saves name, config and credential with one PATCH', async () => {
+    const integrations: Integration[] = [
+      {
+        id: 7,
+        integration_type: 'demo',
+        name: 'old-name',
+        config: { host: '10.0.0.5', port: 8080, host_key: 'pinned' },
+        credential_id: null,
+        enabled: true,
+        status: 'ok',
+        last_run_at: null,
+        last_error: null,
+      },
+    ]
+    let patched: Record<string, unknown> | null = null
+    server.use(
+      http.get('/api/integrations/types', () => HttpResponse.json([DEMO_TYPE])),
+      http.get('/api/credentials', () => HttpResponse.json([])),
+      http.get('/api/integrations', () => HttpResponse.json(integrations)),
+      http.patch('/api/integrations/7', async ({ request }) => {
+        patched = (await request.json()) as Record<string, unknown>
+        return HttpResponse.json({ ...integrations[0], ...patched })
+      }),
+    )
+    const user = userEvent.setup()
+    renderPage()
+
+    await user.click(await screen.findByRole('button', { name: 'Edit' }))
+    expect(await screen.findByRole('heading', { name: 'Edit old-name' })).toBeInTheDocument()
+    expect(screen.getByRole('textbox', { name: /Host/ })).toHaveValue('10.0.0.5')
+
+    const nameInput = screen.getByPlaceholderText('pve1')
+    await user.clear(nameInput)
+    await user.type(nameInput, 'new-name')
+    await user.click(screen.getByRole('button', { name: 'Save changes' }))
+
+    await waitFor(() => expect(patched).toMatchObject({ name: 'new-name', config: { host: '10.0.0.5', host_key: 'pinned' } }))
+    expect(await screen.findByRole('button', { name: 'New integration' })).toBeInTheDocument()
   })
 })

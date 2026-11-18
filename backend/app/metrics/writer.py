@@ -1,5 +1,6 @@
 import asyncio
 import contextlib
+from collections import deque
 from functools import lru_cache
 from typing import Any
 
@@ -23,14 +24,16 @@ class MetricsWriter:
     def __init__(self, databases: Databases, flush_interval: float = FLUSH_INTERVAL_SECONDS) -> None:
         self._databases = databases
         self._flush_interval = flush_interval
-        self._queue: asyncio.Queue[tuple[str, dict[str, Any]]] = asyncio.Queue()
+        self._queue: deque[tuple[str, dict[str, Any]]] = deque()
         self._task: asyncio.Task[None] | None = None
+        self.dropped = 0
+        """Records discarded because the backlog outgrew MAX_BACKLOG during a metrics-database outage."""
 
     def enqueue_check_result(self, **kwargs: Any) -> None:
-        self._queue.put_nowait(("check_result", kwargs))
+        self._queue.append(("check_result", kwargs))
 
     def enqueue_metric_sample(self, **kwargs: Any) -> None:
-        self._queue.put_nowait(("metric_sample", kwargs))
+        self._queue.append(("metric_sample", kwargs))
 
     async def start(self) -> None:
         self._task = asyncio.create_task(self._run())
@@ -48,14 +51,18 @@ class MetricsWriter:
             try:
                 await self._flush()
             except Exception as exc:  # noqa: BLE001 - a locked or briefly unavailable database must not end the writer
-                logger.warning("metrics_flush_failed", error=repr(exc), queued=self._queue.qsize())
+                logger.warning(
+                    "metrics_flush_failed",
+                    error=repr(exc),
+                    queued=len(self._queue),
+                    dropped_total=self.dropped,
+                )
 
     async def _flush(self) -> None:
-        items: list[tuple[str, dict[str, Any]]] = []
-        while not self._queue.empty():
-            items.append(self._queue.get_nowait())
-        if not items:
+        if not self._queue:
             return
+        items = list(self._queue)
+        self._queue.clear()
 
         try:
             async with self._databases.metrics_session_factory() as session:
@@ -66,10 +73,15 @@ class MetricsWriter:
                         session.add(MetricSample(**payload))
                 await session.commit()
         except Exception:
-            # Put the batch back (oldest first) so the next flush retries it; bounded so a long outage
-            # cannot grow memory without limit.
-            for item in items[-MAX_BACKLOG:]:
-                self._queue.put_nowait(item)
+            # Put the batch back ahead of anything queued meanwhile so the next flush retries it in order.
+            # Memory stays bounded: past MAX_BACKLOG the oldest records go, counted and logged.
+            self._queue.extendleft(reversed(items))
+            overflow = len(self._queue) - MAX_BACKLOG
+            if overflow > 0:
+                for _ in range(overflow):
+                    self._queue.popleft()
+                self.dropped += overflow
+                logger.error("metrics_backlog_dropped", dropped=overflow, dropped_total=self.dropped)
             raise
 
 

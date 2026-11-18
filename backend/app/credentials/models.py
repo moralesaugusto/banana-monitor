@@ -31,3 +31,6 @@ class Credential(CredentialsBase):
     created_at: Mapped[datetime.datetime] = mapped_column(UTCDateTime(), default=utcnow)
     rotated_at: Mapped[datetime.datetime | None] = mapped_column(UTCDateTime())
     last_used_at: Mapped[datetime.datetime | None] = mapped_column(UTCDateTime())
+    in_agent_pool: Mapped[bool] = mapped_column(default=False)
+    """Whether AI agents may try this credential against hosts that have no integration of their own
+    (llm/credential_pool.py). Off by default: adding a credential never hands it to the agents."""

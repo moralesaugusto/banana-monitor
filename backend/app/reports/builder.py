@@ -9,7 +9,7 @@ from sqlalchemy import select
 
 from app.db.session import Databases
 from app.domain.enums import AlertState, HealthStatus
-from app.domain.models import AlertStateRow, Device, Network, Service, utcnow
+from app.domain.models import AlertStateRow, Device, HostFinding, Network, Service, utcnow
 
 
 def _fingerprint_text(fp: dict[str, Any] | None) -> str:
@@ -17,6 +17,35 @@ def _fingerprint_text(fp: dict[str, Any] | None) -> str:
         return ""
     product = " ".join(str(v) for v in (fp.get("product"), fp.get("version")) if v)
     return product or str(fp.get("name") or fp.get("banner") or "")
+
+
+SEVERITY_RANK = {"critical": 0, "high": 1, "medium": 2, "low": 3, "info": 4}
+MAX_FINDINGS_PER_DEVICE = 30
+
+
+def _findings_by_ip(rows: list[HostFinding]) -> dict[str, list[dict[str, Any]]]:
+    """The newest record per (host, kind, title), worst severity first. A finding is not dropped when a
+    later run does not repeat it: the report shows when it was last observed instead."""
+    newest: dict[tuple[str, str, str], HostFinding] = {}
+    for row in sorted(rows, key=lambda r: r.observed_at):
+        newest[(row.ip, row.kind, row.title)] = row
+    by_ip: dict[str, list[dict[str, Any]]] = {}
+    for row in newest.values():
+        by_ip.setdefault(row.ip, []).append(
+            {
+                "kind": row.kind,
+                "severity": row.severity,
+                "title": row.title,
+                "detail": row.detail,
+                "source": row.source,
+                "observed_at": row.observed_at.strftime("%Y-%m-%d %H:%M"),
+                "run_id": row.run_id,
+            }
+        )
+    for items in by_ip.values():
+        items.sort(key=lambda f: (SEVERITY_RANK.get(f["severity"], 9), f["observed_at"]), reverse=False)
+        del items[MAX_FINDINGS_PER_DEVICE:]
+    return by_ip
 
 
 async def build_snapshot(databases: Databases) -> dict[str, Any]:
@@ -34,14 +63,22 @@ async def build_snapshot(databases: Databases) -> dict[str, Any]:
             ).scalars()
         )
 
+        findings = _findings_by_ip(list((await session.execute(select(HostFinding))).scalars()))
         by_device: dict[int | None, list[Service]] = {}
         for service in services:
             by_device.setdefault(service.device_id, []).append(service)
 
         network_names: dict[int | None, str] = {n.id: n.name for n in networks}
+        def newest_title(ip: str | None, kind: str) -> str | None:
+            matching = [f for f in findings.get(ip or "", []) if f["kind"] == kind]
+            return max(matching, key=lambda f: f["observed_at"])["title"] if matching else None
+
         device_rows = [
             {
                 "name": d.display_name,
+                "os": newest_title(d.primary_ip, "os"),
+                "updates": newest_title(d.primary_ip, "patch"),
+                "findings": findings.get(d.primary_ip or "", []),
                 "ip": d.primary_ip,
                 "type": d.device_type.value,
                 "status": d.status.value,
@@ -148,7 +185,18 @@ def compute_delta(previous: dict[str, Any], current: dict[str, Any]) -> dict[str
     new_alerts = [curr_alerts[k] for k in curr_alerts if k not in prev_alerts]
     resolved_alerts = [prev_alerts[k] for k in prev_alerts if k not in curr_alerts]
 
+    def finding_keys(snapshot: dict[str, Any]) -> dict[str, dict[str, Any]]:
+        return {
+            f"{d.get('ip')}|{f['kind']}|{f['title']}": {**f, "host": d["name"]}
+            for d in snapshot.get("devices", [])
+            for f in d.get("findings", [])
+        }
+
+    prev_findings, curr_findings = finding_keys(previous), finding_keys(current)
+    new_findings = [curr_findings[k] for k in curr_findings if k not in prev_findings]
+
     return {
+        "new_findings": new_findings,
         "since": previous.get("generated_at"),
         "devices_added": devices_added,
         "devices_removed": devices_removed,
@@ -161,6 +209,79 @@ def compute_delta(previous: dict[str, Any], current: dict[str, Any]) -> dict[str
 
 def _cell(value: object) -> str:
     return str(value if value not in (None, "") else "-").replace("|", "/")
+
+
+def _worst_severity(device: dict[str, Any]) -> str:
+    """The worst severity among a host's problem findings (info-level facts such as its OS do not count).
+    A host with findings but no problem says 'no problems'; one with nothing recorded says 'none
+    recorded', which is not the same thing."""
+    findings = device.get("findings", [])
+    ranks = [SEVERITY_RANK.get(f["severity"], 9) for f in findings if f["severity"] != "info"]
+    if not ranks:
+        return "no problems" if findings else "none recorded"
+    return next(name for name, rank in SEVERITY_RANK.items() if rank == min(ranks))
+
+
+_FINDING_SECTIONS = (
+    ("Vulnerabilities and security", ("vulnerability", "incident")),
+    ("Patch status", ("patch",)),
+    ("Performance and health", ("performance", "other")),
+)
+
+
+def findings_markdown(devices: list[dict[str, Any]]) -> list[str]:
+    """One table per finding group, worst severity first, across every host given. A group with nothing
+    recorded says so: absence of findings means no agent recorded any, not that the hosts were audited."""
+    lines: list[str] = []
+    for heading, kinds in _FINDING_SECTIONS:
+        rows = sorted(
+            (
+                (SEVERITY_RANK.get(f["severity"], 9), d, f)
+                for d in devices
+                for f in d.get("findings", [])
+                if f["kind"] in kinds
+            ),
+            key=lambda row: (row[0], row[1]["name"]),
+        )
+        lines += ["", f"## {heading}", ""]
+        if not rows:
+            lines.append("None recorded.")
+            continue
+        lines += ["| Severity | Host | Finding | Detail | Source | Observed |", "|---|---|---|---|---|---|"]
+        lines += [
+            f"| {f['severity']} | {_cell(d['name'])} ({_cell(d['ip'])}) | {_cell(f['title'])} | "
+            f"{_cell(f['detail'])} | {_cell(f['source'])} | {f['observed_at']} |"
+            for _, d, f in rows
+        ]
+    return lines
+
+
+def delta_markdown(delta: dict[str, Any] | None) -> list[str]:
+    """The 'Changes since last report' section; None means there was no earlier report to compare to."""
+    lines = ["", "## Changes since last report", ""]
+    if delta is None:
+        return [*lines, "No earlier report for this scope to compare with."]
+    entries = (
+        [f"- Device added: {n}" for n in delta["devices_added"]]
+        + [f"- Device removed: {n}" for n in delta["devices_removed"]]
+        + [
+            f"- {c['name']} ({_cell(c['ip'])}): {c['from']} to {c['to']}"
+            for c in delta["device_status_changes"]
+        ]
+        + [
+            f"- {c['device']} {c['service']} (port {_cell(c['port'])}): {c['from']} to {c['to']}"
+            for c in delta["service_status_changes"]
+        ]
+        + [f"- Alert firing: {a['rule']} ({a['entity']})" for a in delta["new_alerts"]]
+        + [f"- Alert resolved: {a['rule']} ({a['entity']})" for a in delta["resolved_alerts"]]
+        + [
+            f"- New {f['severity']} finding on {f['host']}: {f['title']}"
+            for f in delta["new_findings"]
+            if f["kind"] not in ("os", "patch") or f["severity"] != "info"
+        ]
+    )
+    compared = f"Compared with the report from {delta['since']}."
+    return [*lines, compared, "", *(entries or ["Nothing changed."])]
 
 
 def snapshot_markdown(snapshot: dict[str, Any]) -> str:
@@ -190,14 +311,20 @@ def snapshot_markdown(snapshot: dict[str, Any]) -> str:
 
     lines += ["", "## Devices", ""]
     if snapshot["devices"]:
-        lines += ["| Name | IP | Type | Network | Status | Services |", "|---|---|---|---|---|---|"]
         lines += [
-            f"| {_cell(d['name'])} | {_cell(d['ip'])} | {_cell(d['type'])} | {_cell(d['network'])} | "
-            f"{d['status']} | {len(d['services'])} |"
+            "| Name | IP | Type | OS | Updates | Network | Status | Services | Findings |",
+            "|---|---|---|---|---|---|---|---|---|",
+        ]
+        lines += [
+            f"| {_cell(d['name'])} | {_cell(d['ip'])} | {_cell(d['type'])} | {_cell(d.get('os'))} | "
+            f"{_cell(d.get('updates'))} | {_cell(d['network'])} | {d['status']} | {len(d['services'])} | "
+            f"{_worst_severity(d)} |"
             for d in snapshot["devices"]
         ]
     else:
         lines.append("No devices yet.")
+
+    lines += findings_markdown(snapshot["devices"])
 
     lines += ["", "## Services by host", ""]
     shown = False

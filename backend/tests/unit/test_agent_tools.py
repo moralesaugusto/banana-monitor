@@ -50,6 +50,87 @@ async def test_targets_outside_configured_networks_are_rejected(databases) -> No
 
 
 @pytest.mark.asyncio
+async def test_a_private_target_outside_any_configured_network_still_needs_the_switch(databases) -> None:
+    with pytest.raises(agent_tools.AgentToolError, match="not inside"):
+        await agent_tools.run_nmap(databases, {"target": "10.0.0.5"})
+
+
+@pytest.mark.asyncio
+async def test_run_nmap_allows_and_flags_a_private_target_outside_any_network_once_enabled(
+    databases, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A device the administrator never defined a Network for (a second VLAN, a guest network) should
+    not stop the agent cold once undefined-scan is enabled - it should still be scanned, just called
+    out as outside the configured discovery scope so a report mentions it."""
+    await _configure_ai_mode_settings(databases, allow_undefined_network_scan=True)
+
+    async def fake_run(args: list[str], timeout: float, stdin: bytes | None = None) -> dict:
+        return {"exit_code": 0, "output": "22/tcp open ssh"}
+
+    monkeypatch.setattr(agent_tools, "_run", fake_run)
+    result = await agent_tools.run_nmap(databases, {"target": "10.0.0.5"})
+    assert result["exit_code"] == 0
+    assert "outside" in result["note"] and "10.0.0.5" in result["note"]
+
+
+@pytest.mark.asyncio
+async def test_a_public_target_is_not_allowed_by_undefined_scan_alone(databases) -> None:
+    await _configure_ai_mode_settings(databases, allow_undefined_network_scan=True)
+    with pytest.raises(agent_tools.AgentToolError, match="not inside"):
+        await agent_tools.run_nmap(databases, {"target": "8.8.8.8"})
+
+
+@pytest.mark.asyncio
+async def test_a_public_target_is_not_allowed_by_allow_public_targets_alone(databases) -> None:
+    """allow_public_targets is a further relaxation on top of allow_undefined_network_scan, not a
+    replacement for it - defense in depth, since it's the more dangerous of the two switches."""
+    await _configure_ai_mode_settings(databases, allow_public_targets=True)
+    with pytest.raises(agent_tools.AgentToolError, match="not inside"):
+        await agent_tools.run_nmap(databases, {"target": "8.8.8.8"})
+
+
+@pytest.mark.asyncio
+async def test_run_nmap_allows_and_flags_a_public_target_once_both_switches_are_enabled(
+    databases, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    await _configure_ai_mode_settings(
+        databases, allow_undefined_network_scan=True, allow_public_targets=True
+    )
+
+    async def fake_run(args: list[str], timeout: float, stdin: bytes | None = None) -> dict:
+        return {"exit_code": 0, "output": "80/tcp open http"}
+
+    monkeypatch.setattr(agent_tools, "_run", fake_run)
+    result = await agent_tools.run_nmap(databases, {"target": "8.8.8.8"})
+    assert result["exit_code"] == 0
+    assert "PUBLIC" in result["note"] and "8.8.8.8" in result["note"]
+
+
+@pytest.mark.asyncio
+async def test_discover_hosts_still_refuses_a_public_cidr_even_with_allow_public_targets(
+    databases,
+) -> None:
+    """allow_public_targets only ever widens a single-target tool's scope - discover_hosts's CIDR
+    sweep stays confined to RFC1918, since a public range is a mass-scanning capability this setting
+    is not meant to grant."""
+    await _configure_ai_mode_settings(
+        databases, allow_undefined_network_scan=True, allow_public_targets=True
+    )
+    with pytest.raises(agent_tools.AgentToolError, match="RFC1918"):
+        await agent_tools.discover_hosts(databases, {"cidr": "8.8.8.0/28"})
+
+
+@pytest.mark.asyncio
+async def test_record_service_flags_a_target_outside_any_network_once_enabled(databases) -> None:
+    await _configure_ai_mode_settings(databases, allow_undefined_network_scan=True)
+    result = await agent_tools.record_service(
+        databases, {"ip": "10.0.0.5", "port": 22, "service_type": "tcp"}
+    )
+    assert result["recorded"] is True
+    assert "outside" in result["note"]
+
+
+@pytest.mark.asyncio
 async def test_disallowed_nmap_flags_are_rejected(databases) -> None:
     for bad in ("--script=vuln", "-iL", "-oN", "-sU", "-A"):
         with pytest.raises(agent_tools.AgentToolError, match="not allowed"):
@@ -800,6 +881,96 @@ async def test_submit_http_form_get_uses_a_query_string(databases) -> None:
 
 
 @pytest.mark.asyncio
+async def test_submit_http_form_sends_a_raw_body_for_methods_beyond_get_post(databases) -> None:
+    import asyncio
+
+    received: dict[str, bytes] = {}
+
+    async def handle(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        head = await reader.readuntil(b"\r\n\r\n")
+        length = 0
+        for line in head.decode().split("\r\n"):
+            if line.lower().startswith("content-length:"):
+                length = int(line.split(":", 1)[1].strip())
+        body = await reader.readexactly(length) if length else b""
+        received["request"] = head + body
+        writer.write(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok")
+        await writer.drain()
+        writer.close()
+
+    server = await asyncio.start_server(handle, "127.0.0.1", 0)
+    port = server.sockets[0].getsockname()[1]
+    try:
+        result = await agent_tools.submit_http_form(
+            databases,
+            {
+                "target": "127.0.0.1",
+                "port": port,
+                "path": "/items/1",
+                "method": "PUT",
+                "body": '{"name": "x"}',
+                "headers": {"Content-Type": "application/json"},
+            },
+        )
+    finally:
+        server.close()
+        await server.wait_closed()
+
+    assert result["status"] == 200
+    assert b"PUT /items/1" in received["request"]
+    assert b'{"name": "x"}' in received["request"]
+
+
+@pytest.mark.asyncio
+async def test_submit_http_form_allows_a_bodyless_delete_with_no_fields(databases) -> None:
+    import asyncio
+
+    received: dict[str, bytes] = {}
+
+    async def handle(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        received["request"] = await reader.readuntil(b"\r\n\r\n")
+        writer.write(b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\n\r\n")
+        await writer.drain()
+        writer.close()
+
+    server = await asyncio.start_server(handle, "127.0.0.1", 0)
+    port = server.sockets[0].getsockname()[1]
+    try:
+        result = await agent_tools.submit_http_form(
+            databases, {"target": "127.0.0.1", "port": port, "path": "/items/1", "method": "DELETE"},
+        )
+    finally:
+        server.close()
+        await server.wait_closed()
+
+    assert result["status"] == 204
+    assert b"DELETE /items/1" in received["request"]
+
+
+@pytest.mark.asyncio
+async def test_submit_http_form_rejects_fields_and_body_together(databases) -> None:
+    with pytest.raises(agent_tools.AgentToolError, match="mutually exclusive"):
+        await agent_tools.submit_http_form(
+            databases,
+            {
+                "target": "127.0.0.1",
+                "port": 80,
+                "method": "POST",
+                "fields": {"a": "b"},
+                "body": "raw",
+            },
+        )
+
+
+@pytest.mark.asyncio
+async def test_submit_http_form_rejects_an_unsupported_method(databases) -> None:
+    with pytest.raises(agent_tools.AgentToolError, match="method must be one of"):
+        await agent_tools.submit_http_form(
+            databases, {"target": "127.0.0.1", "port": 80, "method": "TRACE"}
+        )
+
+
+@pytest.mark.asyncio
 async def test_submit_http_form_rejects_a_target_outside_any_configured_network(databases) -> None:
     with pytest.raises(agent_tools.AgentToolError, match="not inside"):
         await agent_tools.submit_http_form(
@@ -1134,3 +1305,196 @@ async def test_run_nmap_says_a_skipped_host_is_not_a_clean_result(
     result = await agent_tools.run_nmap(databases, {"target": "127.0.0.1", "flags": ["-sT"]})
 
     assert "says nothing about which ports are open" in result["output"]
+
+
+async def test_remember_persists_a_note_for_the_calling_agent(databases) -> None:
+    from sqlalchemy import select
+
+    from app.domain.models import AiAgentMemory
+
+    result = await agent_tools.dispatch(
+        databases, "remember", {"note": "node3's high disk usage is expected"}, agent_name="bellaco"
+    )
+    assert result == {"saved": True, "note": "node3's high disk usage is expected"}
+
+    async with databases.app_session_factory() as session:
+        entry = (await session.execute(select(AiAgentMemory))).scalar_one()
+    assert entry.agent_name == "bellaco" and entry.content == "node3's high disk usage is expected"
+
+
+async def test_remember_requires_a_note(databases) -> None:
+    with pytest.raises(agent_tools.AgentToolError, match="note"):
+        await agent_tools.remember(databases, {}, agent_name="bellaco")
+
+
+async def test_remember_prunes_the_oldest_entry_once_over_the_global_cap(databases) -> None:
+    from sqlalchemy import select
+
+    from app.domain.bootstrap import ensure_default_ai_mode_settings
+    from app.domain.models import AiAgentMemory
+
+    async with databases.app_session_factory() as session:
+        (await ensure_default_ai_mode_settings(session)).memory_max_entries_per_agent = 3
+        await session.commit()
+
+    for n in range(4):
+        await agent_tools.dispatch(databases, "remember", {"note": f"note {n}"}, agent_name="bellaco")
+
+    async with databases.app_session_factory() as session:
+        contents = (
+            await session.execute(select(AiAgentMemory.content).order_by(AiAgentMemory.id))
+        ).scalars().all()
+    assert contents == ["note 1", "note 2", "note 3"]  # note 0 was pruned, the rest kept
+
+
+async def test_remember_prunes_to_an_agents_own_override_instead_of_the_global_cap(databases) -> None:
+    from sqlalchemy import select, update
+
+    from app.domain.bootstrap import ensure_default_agents, ensure_default_ai_mode_settings
+    from app.domain.models import AiAgent, AiAgentMemory
+
+    async with databases.app_session_factory() as session:
+        (await ensure_default_ai_mode_settings(session)).memory_max_entries_per_agent = 30
+        await ensure_default_agents(session)
+        await session.execute(
+            update(AiAgent).where(AiAgent.name == "bellaco").values(memory_max_entries_override=2)
+        )
+        await session.commit()
+
+    for n in range(4):
+        await agent_tools.dispatch(databases, "remember", {"note": f"note {n}"}, agent_name="bellaco")
+
+    async with databases.app_session_factory() as session:
+        contents = (
+            await session.execute(select(AiAgentMemory.content).order_by(AiAgentMemory.id))
+        ).scalars().all()
+    assert contents == ["note 2", "note 3"]  # agent's own override (2) wins over the global default (30)
+
+
+async def test_remember_truncates_a_long_note(databases) -> None:
+    from sqlalchemy import select
+
+    from app.domain.bootstrap import ensure_default_ai_mode_settings
+    from app.domain.models import AiAgentMemory
+
+    await agent_tools.dispatch(databases, "remember", {"note": "x" * 1000}, agent_name="bellaco")
+
+    async with databases.app_session_factory() as session:
+        entry = (await session.execute(select(AiAgentMemory))).scalar_one()
+        default_max_chars = (await ensure_default_ai_mode_settings(session)).memory_max_content_chars
+    assert len(entry.content) == default_max_chars
+
+
+async def test_remember_dry_run_does_not_persist(databases) -> None:
+    from sqlalchemy import select
+
+    from app.domain.models import AiAgentMemory
+
+    result = await agent_tools.dispatch(
+        databases, "remember", {"note": "x"}, agent_name="bellaco", dry_run=True
+    )
+    assert result == {"saved": False, "dry_run": True, "note": "x"}
+
+    async with databases.app_session_factory() as session:
+        rows = (await session.execute(select(AiAgentMemory))).scalars().all()
+    assert rows == []
+
+
+async def test_remember_is_opt_in(databases) -> None:
+    with pytest.raises(agent_tools.AgentToolError):
+        await agent_tools.dispatch(
+            databases, "remember", {"note": "x"}, enabled=["run_nmap"], agent_name="bellaco"
+        )
+
+
+@pytest.mark.asyncio
+async def test_memory_is_injected_into_the_system_prompt_only_when_remember_is_enabled(
+    databases, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from sqlalchemy import select, update
+
+    from app.domain.bootstrap import ensure_default_agents
+    from app.domain.models import AiAgent, AiAgentMemory
+
+    async with databases.app_session_factory() as session:
+        await ensure_default_agents(session)
+        await session.execute(update(AiAgent).where(AiAgent.name != "discoverer").values(enabled=False))
+        session.add(AiAgentMemory(agent_name="discoverer", content="host1's slow clock is expected"))
+        await session.commit()
+
+    seen: list[str] = []
+
+    async def fake(**kwargs: object) -> dict:
+        seen.append(kwargs["messages"][0]["content"])  # type: ignore[index]
+        return _reply("done")
+
+    monkeypatch.setattr("app.llm.orchestrator.call_chat_completions", fake)
+    run_id = await create_run(databases, ["192.168.50.7"], dry_run=False)
+    await run_agent(databases, run_id)
+    assert "host1's slow clock is expected" not in seen[0]  # discoverer has not ticked remember
+
+    async with databases.app_session_factory() as session:
+        discoverer = await session.scalar(select(AiAgent).where(AiAgent.name == "discoverer"))
+        discoverer.enabled_tools = [*discoverer.enabled_tools, "remember"]
+        await session.commit()
+
+    seen.clear()
+    run_id = await create_run(databases, ["192.168.50.7"], dry_run=False)
+    await run_agent(databases, run_id)
+    assert "host1's slow clock is expected" in seen[0]
+
+
+async def test_memory_context_drops_older_notes_once_over_the_inject_budget(databases) -> None:
+    from app.domain.bootstrap import ensure_default_ai_mode_settings
+    from app.domain.models import AiAgentMemory
+    from app.llm.orchestrator import _memory_context
+
+    async with databases.app_session_factory() as session:
+        (await ensure_default_ai_mode_settings(session)).memory_max_inject_chars = 25
+        session.add_all(
+            [
+                AiAgentMemory(agent_name="bellaco", content="note A, twelve chars"),
+                AiAgentMemory(agent_name="bellaco", content="note B, twelve chars"),
+            ]
+        )
+        await session.commit()
+
+    context = await _memory_context(databases, "bellaco")
+    assert "note B, twelve chars" in context  # newest kept
+    assert "note A, twelve chars" not in context  # dropped: together they exceed the 25-char budget
+
+
+async def test_memory_context_always_includes_at_least_the_newest_note_truncated(databases) -> None:
+    from app.domain.bootstrap import ensure_default_ai_mode_settings
+    from app.domain.models import AiAgentMemory
+    from app.llm.orchestrator import _memory_context
+
+    async with databases.app_session_factory() as session:
+        (await ensure_default_ai_mode_settings(session)).memory_max_inject_chars = 10
+        session.add(AiAgentMemory(agent_name="bellaco", content="a note much longer than ten characters"))
+        await session.commit()
+
+    context = await _memory_context(databases, "bellaco")
+    assert "a note muc" in context  # the single newest note, truncated to the 10-char budget
+    assert "longer than ten characters" not in context
+
+
+async def test_memory_context_uses_an_agents_own_inject_override(databases) -> None:
+    from sqlalchemy import update
+
+    from app.domain.bootstrap import ensure_default_agents, ensure_default_ai_mode_settings
+    from app.domain.models import AiAgent, AiAgentMemory
+    from app.llm.orchestrator import _memory_context
+
+    async with databases.app_session_factory() as session:
+        (await ensure_default_ai_mode_settings(session)).memory_max_inject_chars = 2000
+        await ensure_default_agents(session)
+        await session.execute(
+            update(AiAgent).where(AiAgent.name == "bellaco").values(memory_max_inject_chars_override=10)
+        )
+        session.add(AiAgentMemory(agent_name="bellaco", content="a note much longer than ten characters"))
+        await session.commit()
+
+    context = await _memory_context(databases, "bellaco")
+    assert "a note muc" in context  # the agent's own tight override (10) wins over the global default (2000)
+    assert "longer than ten characters" not in context

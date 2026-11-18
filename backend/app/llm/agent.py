@@ -16,20 +16,34 @@ from app.domain.bootstrap import (
     ensure_default_ai_mode_settings,
 )
 from app.domain.models import AiAgent, AiRun, AiRunStep, Device, Network, utcnow
-from app.llm.provider import effective_endpoint
+from app.llm.provider import effective_endpoint, effective_fallback_endpoint
 from app.logging_setup import get_logger
+from app.prompts import load_prompt
 
 logger = get_logger(__name__)
 
 MAX_STORED_CONTENT_CHARS = 3000
 
-DEFAULT_SYSTEM_PROMPT = (
-    "Find open ports on each given target IP: run_nmap -Pn -sT -T4 --open (no -sV), then "
-    "report_open_ports once per target. Don't guess services or call record_service - reviewer "
-    "does that. Stick to given targets, unless asked to find new ones: then discover_hosts with a "
-    "CIDR (e.g. 192.168.1.0/24), never a single IP. Scan everything, then report everything. End "
-    "with a one-paragraph summary."
-)
+DEFAULT_SYSTEM_PROMPT = load_prompt("default_agent")
+"""The prompt an agent with a blank system_prompt uses (most commonly the single-agent `discoverer`
+before anyone has set one). Text lives in agents_system_prompts/default_agent.md."""
+
+
+def _fallback_snapshot(endpoint: Any | None) -> dict[str, Any]:
+    """The four fallback_* snapshot fields for one agent - '' / None when it has none configured."""
+    if endpoint is None:
+        return {
+            "fallback_provider": "",
+            "fallback_base_url": "",
+            "fallback_model": "",
+            "fallback_credential_id": None,
+        }
+    return {
+        "fallback_provider": endpoint.provider.value,
+        "fallback_base_url": endpoint.base_url,
+        "fallback_model": endpoint.model,
+        "fallback_credential_id": endpoint.credential_id,
+    }
 
 
 def _clip(value: Any) -> Any:
@@ -85,6 +99,15 @@ async def create_run(
             )
             for a in agents
         }
+        fallbacks = {
+            a.name: effective_fallback_endpoint(
+                provider=a.fallback_provider,
+                base_url=a.fallback_base_url,
+                model=a.fallback_model,
+                credential_id=a.fallback_credential_id,
+            )
+            for a in agents
+        }
         entry_endpoint = endpoints[entry.name]
         run = AiRun(
             targets=targets,
@@ -128,6 +151,7 @@ async def create_run(
                         "allow_changes": a.allow_changes,
                         "llm_timeout_seconds": a.llm_timeout_seconds,
                         "max_run_minutes": a.max_run_minutes,
+                        **_fallback_snapshot(fallbacks[a.name]),
                     }
                     for a in agents
                 ],

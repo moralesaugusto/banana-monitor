@@ -1,6 +1,17 @@
 import { useState } from 'react'
+import { Link, useSearchParams } from 'react-router-dom'
 import type { AiRunDetail, AiRunStep } from '../../api/aiMode'
 import { Card } from '../../components/Card'
+import {
+  EMPTY_TRACE_FILTERS,
+  filterSteps,
+  hasActiveTraceFilters,
+  traceFiltersFromParams,
+  traceFiltersToParams,
+  type StepFacet,
+  type TraceFilters,
+} from '../../lib/traceFilters'
+import { StepFilterPanel } from './StepFilterPanel'
 import { stuckStreaks } from './traceAnalysis'
 
 interface ToolCallDecision {
@@ -135,6 +146,16 @@ function StepCard({ step, stuckStreak }: { step: AiRunStep; stuckStreak?: number
       )}
       {step.kind === 'tool' && (
         <>
+          {typeof response.error === 'string' && (
+            <p className="mt-2 rounded-control bg-red-500/10 p-2 text-sm text-red-700 dark:text-red-400">
+              Stopped by: {response.error}
+            </p>
+          )}
+          <p className="mt-2 text-xs">
+            <Link className="text-accent-strong hover:underline" to={`/ai/tools#${step.name}`}>
+              How {step.name} works and what limits it
+            </Link>
+          </p>
           <div className="mt-2 font-mono text-xs text-fg-muted">arguments</div>
           <Json value={step.request} />
           <div className="mt-2 font-mono text-xs text-fg-muted">result</div>
@@ -172,6 +193,18 @@ export function RunMetrics({ run }: { run: AiRunDetail }) {
 
 export function RunTrace({ run }: { run: AiRunDetail }) {
   const streaks = stuckStreaks(run.steps)
+  const [params, setParams] = useSearchParams()
+  const filters = traceFiltersFromParams(params)
+  const update = (next: TraceFilters) => setParams(traceFiltersToParams(next), { replace: true })
+  const toggle = (facet: StepFacet, value: string) =>
+    update({
+      ...filters,
+      [facet]: filters[facet].includes(value) ? filters[facet].filter((v) => v !== value) : [...filters[facet], value],
+    })
+  const visibleSteps = filterSteps(run.steps, filters)
+  const active = hasActiveTraceFilters(filters)
+  const chips = (['agent', 'tool'] as const).flatMap((facet) => filters[facet].map((value) => ({ facet, value })))
+
   return (
     <div className="flex flex-col gap-3">
       <RunMetrics run={run} />
@@ -185,17 +218,60 @@ export function RunTrace({ run }: { run: AiRunDetail }) {
           <Json value={{ ...run.settings_snapshot, base_url: run.base_url }} />
         </Disclosure>
       </Card>
-      {run.steps.map((step) => (
-        <StepCard key={step.idx} step={step} stuckStreak={streaks.get(step.idx)} />
-      ))}
-      {run.status === 'running' && <div className="text-sm text-fg-muted">Working...</div>}
-      {run.error && <div className="text-sm text-red-600">{run.error}</div>}
-      {run.summary && (
-        <Card className="p-3">
-          <div className="text-xs text-fg-muted">Final summary written by the model</div>
-          <p className="mt-1 whitespace-pre-wrap text-sm">{run.summary}</p>
-        </Card>
+
+      {active && (
+        <div className="flex flex-wrap items-center gap-2">
+          {chips.map(({ facet, value }) => (
+            <button
+              key={`${facet}:${value}`}
+              type="button"
+              aria-label={`Remove ${facet} filter ${value}`}
+              onClick={() => toggle(facet, value)}
+              className="rounded-full border border-line bg-surface px-2.5 py-0.5 font-mono text-xs hover:bg-line/40"
+            >
+              {facet}: {value} &times;
+            </button>
+          ))}
+          {filters.errorsOnly && (
+            <button
+              type="button"
+              onClick={() => update({ ...filters, errorsOnly: false })}
+              className="rounded-full border border-line bg-surface px-2.5 py-0.5 text-xs hover:bg-line/40"
+            >
+              errors only &times;
+            </button>
+          )}
+          <button type="button" className="text-xs text-accent-strong hover:underline" onClick={() => update(EMPTY_TRACE_FILTERS)}>
+            Clear all
+          </button>
+        </div>
       )}
+
+      <div className="flex flex-col gap-4 lg:flex-row">
+        <div className="flex min-w-0 flex-1 flex-col gap-3">
+          {visibleSteps.length === 0 && run.steps.length > 0 && (
+            <Card className="p-3 text-sm text-fg-muted">No steps match these filters.</Card>
+          )}
+          {visibleSteps.map((step) => (
+            <StepCard key={step.idx} step={step} stuckStreak={streaks.get(step.idx)} />
+          ))}
+          {run.status === 'running' && <div className="text-sm text-fg-muted">Working...</div>}
+          {run.error && <div className="text-sm text-red-600">{run.error}</div>}
+          {run.summary && (
+            <Card className="p-3">
+              <div className="text-xs text-fg-muted">Final summary written by the model</div>
+              <p className="mt-1 whitespace-pre-wrap text-sm">{run.summary}</p>
+            </Card>
+          )}
+        </div>
+        <StepFilterPanel
+          steps={run.steps}
+          filters={filters}
+          onToggle={toggle}
+          onClear={(facet) => update({ ...filters, [facet]: [] })}
+          onToggleErrorsOnly={() => update({ ...filters, errorsOnly: !filters.errorsOnly })}
+        />
+      </div>
     </div>
   )
 }

@@ -39,8 +39,26 @@ def effective_endpoint(
     return Endpoint(chosen, host, name, key_id)
 
 
+def effective_fallback_endpoint(
+    *, provider: str, base_url: str, model: str, credential_id: int | None
+) -> Endpoint | None:
+    """An agent's optional fallback endpoint, retried once if its primary model call fails. Unlike
+    the primary endpoint, a fallback never inherits the AI Mode defaults - an empty provider means
+    no fallback is configured at all, not "use the default"."""
+    if not provider:
+        return None
+    chosen = AssistantProvider(provider)
+    is_openrouter = chosen == AssistantProvider.OPENROUTER
+    standard = OPENROUTER_BASE_URL if is_openrouter else get_settings().ollama_base_url
+    key_id = credential_id if is_openrouter else None
+    return Endpoint(chosen, base_url or standard, model, key_id)
+
+
 async def load_api_key(databases: Databases, credential_id: int | None) -> str | None:
-    """The decrypted OpenRouter key, for the caller to keep in a local variable only."""
+    """The decrypted API key behind a stored credential, for the caller to keep in a local
+    variable only. Originally written for an agent's OpenRouter key; also used for the knowledge
+    base's embedding host credential (app.knowledge.service) - the lookup itself is generic, it
+    just decrypts whatever 'token' field the credential holds."""
     if credential_id is None:
         return None
     async with databases.credentials_session_factory() as session:

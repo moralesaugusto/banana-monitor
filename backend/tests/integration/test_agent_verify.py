@@ -200,6 +200,115 @@ async def test_response_carries_no_credentials(client):
     assert secret not in response.text
 
 
+async def test_switching_provider_with_no_model_typed_fails_clearly(client, ollama):
+    """Switching provider does not carry a model name across (an Ollama model name means nothing
+    to OpenRouter, and vice versa) - this must not show "Model  is not on the host" with a blank
+    name, which looks like a bug rather than a clear "pick a model" prompt."""
+    data, checks = await _verify(client, _agent(provider="openrouter", model_override=""))
+    assert data["ok"] is False
+    assert checks["model"]["status"] == "fail"
+    assert checks["model"]["title"] == "No model chosen"
+    assert "key" not in checks and "latency" not in checks  # never reached - no model to check with
+
+
+async def test_openrouter_with_no_key_configured_fails_clearly_before_any_model_call(
+    client, ollama, monkeypatch
+):
+    """A draft OpenRouter agent with no credential picked yet (its own or the default's) must be
+    told that plainly, not get a misleading "the model did not respond" after a call that was
+    never going to succeed - this is the common case for a freshly-added agent, not an edge case."""
+    called = False
+
+    async def fake_completion(**kwargs):
+        nonlocal called
+        called = True
+        return {"choices": [{"message": {"content": "ok"}}]}
+
+    monkeypatch.setattr("app.llm.agent_verify.call_chat_completions", fake_completion)
+    data, checks = await _verify(client, _agent(provider="openrouter", model_override="qwen3:8b"))
+    assert data["ok"] is False
+    assert checks["key"]["status"] == "fail"
+    assert "No OpenRouter API key" in checks["key"]["title"]
+    assert "latency" not in checks  # never attempted - there was no key to even try with
+    assert called is False
+
+
+async def test_openrouter_with_a_rejected_key_is_not_mislabeled_as_a_timeout(
+    client, ollama, completion
+):
+    """An immediately-rejected call (bad/expired key) must not be reported as "did not respond
+    within 45s" - that implies a hang, not an auth rejection, and would send someone down the
+    wrong troubleshooting path (checking the host's speed instead of the key)."""
+    async with get_databases().credentials_engine.begin() as conn:
+        await conn.run_sync(CredentialsBase.metadata.create_all)
+    cred = (
+        await client.post(
+            "/api/credentials",
+            json={"label": "k", "credential_type": "api_token", "secret": {"token": "sk-or-bad"}},
+        )
+    ).json()
+
+    completion["error"] = "401 Unauthorized: No auth credentials found"
+    data, checks = await _verify(
+        client, _agent(provider="openrouter", model_override="qwen3:8b", credential_id=cred["id"])
+    )
+    assert data["ok"] is False
+    assert checks["latency"]["status"] == "fail"
+    assert checks["latency"]["title"] == "The model call failed"  # not "did not respond"
+    assert "401" in checks["latency"]["detail"]
+
+
 async def test_a_malformed_draft_is_a_422(client):
     response = await client.post("/api/ai-mode/agents/verify", json=_agent(name="Bad Name"))
+    assert response.status_code == 422
+
+
+async def test_agent_test_connection_uses_the_agents_default_when_fields_are_blank(
+    client, monkeypatch
+):
+    """Every agent gets the same lightweight connection test the General/Assistant tabs have -
+    just host/key/model/reply/tool-calling, resolved the same way Verify resolves a model host."""
+    seen = {}
+
+    async def fake_list_models(base_url, timeout=5.0):
+        seen["list_models_host"] = base_url
+        return ["qwen3:8b"]
+
+    async def fake_completion(**kwargs):
+        seen["completion_kwargs"] = kwargs
+        return {"choices": [{"message": {"content": "pong", "tool_calls": [{"function": {"name": "ping"}}]}}]}
+
+    monkeypatch.setattr("app.llm.connection_check.list_models", fake_list_models)
+    monkeypatch.setattr("app.llm.connection_check.call_chat_completions", fake_completion)
+
+    response = await client.post("/api/ai-mode/agents/test-connection", json={})
+    assert response.status_code == 200, response.text
+    data = response.json()
+    checks = {c["id"]: c for c in data["checks"]}
+    assert data["ok"] is True
+    assert seen["list_models_host"] == "http://localhost:11434/v1"  # the agents' default host
+    assert checks["model"]["status"] == "ok"
+
+
+async def test_agent_test_connection_openrouter_with_no_key(client, monkeypatch):
+    async def fake_list_models(base_url, timeout=5.0):
+        return ["anthropic/claude-3.5-sonnet"]
+
+    monkeypatch.setattr("app.llm.connection_check.list_models", fake_list_models)
+
+    response = await client.post(
+        "/api/ai-mode/agents/test-connection",
+        json={"provider": "openrouter", "model": "anthropic/claude-3.5-sonnet"},
+    )
+    assert response.status_code == 200, response.text
+    data = response.json()
+    checks = {c["id"]: c for c in data["checks"]}
+    assert data["ok"] is False
+    assert checks["key"]["status"] == "fail" and checks["key"]["title"] == "No OpenRouter API key"
+    assert "agents" not in checks  # the "agents run on Ollama" note is for the chat assistant's
+    # own test only - actively wrong here, since this test is checking an agent's own connection
+
+
+async def test_agent_test_connection_rejects_a_malformed_timeout(client):
+    response = await client.post("/api/ai-mode/agents/test-connection", json={"timeout_seconds": 1})
     assert response.status_code == 422

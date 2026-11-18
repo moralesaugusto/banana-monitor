@@ -7,13 +7,14 @@ from typing import Literal
 
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
-from sqlalchemy import func, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.orm import selectinload
 
 from app.api.deps import AppSession, CredentialServiceDep, CredentialsSession, require_credential
 from app.api.routes.ai_mode import start_run
 from app.api.schemas.ai_mode import (
     AgentBase,
+    AgentConnectionTest,
     AgentRead,
     AgentStartRequest,
     AgentState,
@@ -31,6 +32,7 @@ from app.api.schemas.ai_mode import (
     BusTopicStats,
     Decision,
     HumanMessage,
+    MemoryEntryRead,
     MessageRead,
     RunStatus,
     ScheduleRead,
@@ -38,6 +40,7 @@ from app.api.schemas.ai_mode import (
     VerifyResult,
     WorkflowUpdate,
 )
+from app.db.session import get_databases
 from app.domain.bootstrap import (
     ensure_default_agents,
     ensure_default_ai_mode_settings,
@@ -46,6 +49,7 @@ from app.domain.bootstrap import (
 from app.domain.enums import AssistantProvider
 from app.domain.models import (
     AiAgent,
+    AiAgentMemory,
     AiCustomTool,
     AiMessage,
     AiMessageDelivery,
@@ -64,6 +68,7 @@ from app.llm.bus import (
     valid_pattern,
 )
 from app.llm.client import LLMRequestError, list_models
+from app.llm.connection_check import check_connection
 from app.llm.orchestrator import (
     APPROVAL_TIMEOUT_SECONDS,
     MAX_RUN_SECONDS,
@@ -73,7 +78,7 @@ from app.llm.orchestrator import (
     stop_agent,
 )
 from app.llm.orchestrator import Decision as HumanDecision
-from app.llm.provider import effective_endpoint
+from app.llm.provider import effective_endpoint, effective_fallback_endpoint, load_api_key
 from app.llm.schedule import loop_anchor, next_run_at
 
 router = APIRouter(prefix="/ai-mode", tags=["ai-agents"])
@@ -103,6 +108,19 @@ async def _validate_agent(
         raise HTTPException(
             status_code=422, detail="Set a model: the default model belongs to the other provider"
         )
+    fallback = effective_fallback_endpoint(
+        provider=payload.fallback_provider,
+        base_url=payload.fallback_base_url,
+        model=payload.fallback_model,
+        credential_id=payload.fallback_credential_id,
+    )
+    if fallback is not None:
+        if not fallback.model:
+            raise HTTPException(
+                status_code=422, detail="Set a fallback model, or clear the fallback provider"
+            )
+        if fallback.provider == AssistantProvider.OPENROUTER:
+            await require_credential(credential_service, credentials_session, fallback.credential_id)
     custom = set(await session.scalars(select(AiCustomTool.name)))
     if unknown := unknown_tools(payload.enabled_tools, custom):
         raise HTTPException(status_code=422, detail=f"unknown tools: {unknown}")
@@ -123,10 +141,25 @@ async def _agent_or_404(session: AppSession, agent_id: int) -> AiAgent:
     return agent
 
 
+async def _attach_memory_counts(session: AppSession, agents: list[AiAgent]) -> list[AiAgent]:
+    """Sets `.memory_count` (not a real column) on each agent so AgentRead can report it without a
+    separate request per agent - what the Agents list badges and the detail header read."""
+    rows = await session.execute(
+        select(AiAgentMemory.agent_name, func.count())
+        .where(AiAgentMemory.agent_name.in_([a.name for a in agents]))
+        .group_by(AiAgentMemory.agent_name)
+    )
+    counts: dict[str, int] = dict(rows.all())  # type: ignore[arg-type]
+    for agent in agents:
+        agent.memory_count = counts.get(agent.name, 0)  # type: ignore[attr-defined]
+    return agents
+
+
 @router.get("/agents", response_model=list[AgentRead])
 async def list_agents(session: AppSession) -> list[AiAgent]:
     await ensure_default_agents(session)
-    return list((await session.scalars(select(AiAgent).order_by(AiAgent.id))).all())
+    agents = list((await session.scalars(select(AiAgent).order_by(AiAgent.id))).all())
+    return await _attach_memory_counts(session, agents)
 
 
 @router.post("/agents/verify", response_model=VerifyResult)
@@ -135,6 +168,37 @@ async def verify_agent_settings(
 ) -> VerifyResult:
     """Pre-flight checks for a draft or saved agent (tools, host and model, readers, prerequisites)."""
     return await verify_agent(session, payload, agent_id)
+
+
+@router.post("/agents/test-connection", response_model=VerifyResult)
+async def test_agent_connection(payload: AgentConnectionTest, session: AppSession) -> VerifyResult:
+    """Just the live-connection part of Verify (host/key/model/reply/tool-calling), same checks and
+    same shape as the chat assistant's and the agents' default LLM's own "Test connection" - lets
+    one agent's host, model and key be tried without saving first or wading through the rest of
+    Verify's agent-config checks (tools, messaging, prerequisites)."""
+    defaults = await ensure_default_ai_mode_settings(session)
+    endpoint = effective_endpoint(
+        defaults,
+        provider=payload.provider,
+        base_url=payload.base_url,
+        model=payload.model,
+        credential_id=payload.credential_id,
+    )
+    api_key = payload.api_key
+    needs_key = endpoint.provider == AssistantProvider.OPENROUTER and endpoint.credential_id is not None
+    if not api_key and needs_key:
+        try:
+            api_key = await load_api_key(get_databases(), endpoint.credential_id)
+        except LLMRequestError:
+            api_key = None
+    return await check_connection(
+        endpoint.provider,
+        endpoint.base_url,
+        endpoint.model,
+        api_key,
+        payload.timeout_seconds or defaults.llm_call_timeout_seconds,
+        for_chat_assistant=False,
+    )
 
 
 @router.post("/agents", response_model=AgentRead, status_code=201)
@@ -148,6 +212,7 @@ async def create_agent(
     agent = AiAgent(**payload.model_dump())
     session.add(agent)
     await session.commit()
+    await _attach_memory_counts(session, [agent])
     return agent
 
 
@@ -164,6 +229,7 @@ async def update_agent(
     for field, value in payload.model_dump(exclude={"workflow_x", "workflow_y"}).items():
         setattr(agent, field, value)
     await session.commit()
+    await _attach_memory_counts(session, [agent])
     return agent
 
 
@@ -174,20 +240,72 @@ async def update_agent_workflow(agent_id: int, payload: WorkflowUpdate, session:
     for field, value in payload.model_dump(exclude_unset=True).items():
         setattr(agent, field, value)
     await session.commit()
+    await _attach_memory_counts(session, [agent])
     return agent
 
 
 @router.delete("/agents/{agent_id}", status_code=204)
 async def delete_agent(agent_id: int, session: AppSession) -> None:
-    await session.delete(await _agent_or_404(session, agent_id))
+    agent = await _agent_or_404(session, agent_id)
+    await session.execute(delete(AiAgentMemory).where(AiAgentMemory.agent_name == agent.name))
+    await session.delete(agent)
+    await session.commit()
+
+
+@router.get("/agents/{agent_id}/memory", response_model=list[MemoryEntryRead])
+async def list_agent_memory(agent_id: int, session: AppSession) -> list[AiAgentMemory]:
+    agent = await _agent_or_404(session, agent_id)
+    rows = await session.scalars(
+        select(AiAgentMemory)
+        .where(AiAgentMemory.agent_name == agent.name)
+        .order_by(AiAgentMemory.created_at.desc(), AiAgentMemory.id.desc())
+    )
+    return list(rows.all())
+
+
+@router.delete("/agents/{agent_id}/memory/{memory_id}", status_code=204)
+async def delete_agent_memory_entry(agent_id: int, memory_id: int, session: AppSession) -> None:
+    agent = await _agent_or_404(session, agent_id)
+    entry = await session.get(AiAgentMemory, memory_id)
+    if entry is None or entry.agent_name != agent.name:
+        raise HTTPException(status_code=404, detail="Memory entry not found")
+    await session.delete(entry)
+    await session.commit()
+
+
+@router.delete("/agents/{agent_id}/memory", status_code=204)
+async def clear_agent_memory(agent_id: int, session: AppSession) -> None:
+    """Clears every saved note for this agent - "clean that memory" in bulk."""
+    agent = await _agent_or_404(session, agent_id)
+    await session.execute(delete(AiAgentMemory).where(AiAgentMemory.agent_name == agent.name))
+    await session.commit()
+
+
+@router.delete("/memory", status_code=204)
+async def clear_all_agent_memory(session: AppSession) -> None:
+    """Clears every saved note for every agent at once - "clean all memory", not scoped to one
+    agent. Lives next to the global memory-limit settings (AI Mode > Settings > General)."""
+    await session.execute(delete(AiAgentMemory))
     await session.commit()
 
 
 @router.get("/ollama-models")
-async def list_ollama_models(session: AppSession, base_url: str = "") -> dict[str, object]:
-    """Models served by an Ollama host (OpenAI-compatible `/models`), so the Agents form can offer a choice.
-    Empty `base_url` means the agents' default host."""
-    host = base_url or (await ensure_default_ai_mode_settings(session)).llm_base_url
+async def list_ollama_models(
+    session: AppSession, base_url: str = "", provider: str = ""
+) -> dict[str, object]:
+    """Models served by an Ollama or OpenRouter host (OpenAI-compatible `/models`), so the Agents
+    form can offer a choice. Resolved the same way Verify resolves a model host
+    (`effective_endpoint`), so "Load models" and "Verify" always agree on which host they mean -
+    without `provider`, an empty `base_url` falls back to the agents' default host regardless of
+    what that default's own provider is, which pointed OpenRouter agents at localhost before this."""
+    defaults = await ensure_default_ai_mode_settings(session)
+    try:
+        endpoint = effective_endpoint(
+            defaults, provider=provider, base_url=base_url, model="", credential_id=None
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=f"invalid provider {provider!r}") from exc
+    host = endpoint.base_url
     if not re.match(r"^https?://\S+$", host):
         raise HTTPException(status_code=422, detail="base_url must be an http(s) URL")
     try:

@@ -33,7 +33,12 @@ def _inline(text: str) -> str:
 
 def _table(rows: list[list[str]], cell: ParagraphStyle) -> Table:
     data = [[Paragraph(_inline(c), cell) for c in row] for row in rows]
-    table = Table(data, repeatRows=1, hAlign="LEFT")
+    # Column widths follow the longest cell (bounded), so a nine-column host table keeps its short
+    # columns narrow instead of splitting the page width evenly and wrapping every word.
+    longest = [max(len(r[i]) if i < len(r) else 0 for r in rows) for i in range(len(rows[0]))]
+    weights = [min(max(6, n), 40) for n in longest]
+    usable = A4[0] - 30 * mm
+    table = Table(data, colWidths=[usable * w / sum(weights) for w in weights], repeatRows=1, hAlign="LEFT")
     table.setStyle(
         TableStyle(
             [

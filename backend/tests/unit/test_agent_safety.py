@@ -102,6 +102,32 @@ async def test_user_guardrails_apply_to_inspection_tools(databases, monkeypatch)
     assert step is not None and "blocked by guardrail 'no-uname'" in step.response["error"]
 
 
+_NMAP_OUTSIDE = '{"target": "8.8.8.8", "flags": ["-Pn", "-sT"]}'
+
+
+async def _call_nmap_under_guardrail(databases, monkeypatch, applies_to: str):
+    await _only_discoverer(databases, enabled_tools=["run_nmap"])
+    async with databases.app_session_factory() as session:
+        session.add(
+            AiGuardrail(name="no-google-dns", kind="deny_regex", pattern="8\\.8\\.8", applies_to=applies_to)
+        )
+        await session.commit()
+    _script(monkeypatch, [_reply(calls=[("run_nmap", _NMAP_OUTSIDE)]), _reply("Done.")])
+    run_id = await create_run(databases, ["10.0.0.5"], dry_run=False)
+    await asyncio.wait_for(run_agent(databases, run_id), 5)
+    return (await _tool_step(databases)).response["error"]
+
+
+async def test_a_default_scope_guardrail_leaves_run_nmap_to_its_own_checks(databases, monkeypatch):
+    error = await _call_nmap_under_guardrail(databases, monkeypatch, "default")
+    assert "not inside any configured network" in error  # reached run_nmap's own target check
+
+
+async def test_an_all_scope_guardrail_also_stops_built_in_tools(databases, monkeypatch):
+    error = await _call_nmap_under_guardrail(databases, monkeypatch, "all")
+    assert "blocked by guardrail 'no-google-dns'" in error
+
+
 async def test_api_refuses_changing_tool_without_allow_changes(client):
     agents = (await client.get("/api/ai-mode/agents")).json()
     base = {k: v for k, v in agents[0].items() if k not in ("id", "created_at", "updated_at")}
@@ -114,3 +140,12 @@ async def test_api_refuses_changing_tool_without_allow_changes(client):
 
     assert refused.status_code == 422 and "May change hosts" in refused.json()["detail"]
     assert allowed.status_code == 200 and allowed.json()["allow_changes"] is True
+
+
+def test_guardrails_see_values_inside_lists_and_objects() -> None:
+    from app.llm.custom_tools import string_values
+
+    values = string_values(
+        {"target": "10.0.0.5", "flags": ["-sT", "--script=x"], "opts": {"a": 1, "b": None}}
+    )
+    assert values == ["10.0.0.5", "-sT", "--script=x", "1"]

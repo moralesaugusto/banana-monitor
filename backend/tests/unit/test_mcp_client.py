@@ -65,3 +65,27 @@ async def test_mcp_error_becomes_a_tool_error(monkeypatch: pytest.MonkeyPatch) -
     monkeypatch.setattr(custom_tools.httpx, "AsyncClient", functools.partial(real, transport=transport))
     with pytest.raises(AgentToolError, match="boom"):
         await custom_tools._call_mcp(_tool(), {"host": "10.0.0.5"})
+
+
+async def test_list_mcp_tools_pages_through_tools_and_reports_the_server(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        if body["method"] == "notifications/initialized":
+            return httpx.Response(202)
+        if body["method"] == "initialize":
+            info = {"serverInfo": {"name": "hexstrike", "version": "6.0"}}
+            return httpx.Response(200, json={"jsonrpc": "2.0", "id": 1, "result": info})
+        first = not body["params"].get("cursor")
+        result = {"tools": [{"name": "a" if first else "b"}], **({"nextCursor": "p2"} if first else {})}
+        return httpx.Response(200, json={"jsonrpc": "2.0", "id": 3, "result": result})
+
+    real = httpx.AsyncClient
+    transport = httpx.MockTransport(handler)
+    monkeypatch.setattr(custom_tools.httpx, "AsyncClient", functools.partial(real, transport=transport))
+
+    listing = await custom_tools.list_mcp_tools("http://mcp.local/mcp", 5)
+
+    assert (listing.server_name, listing.server_version) == ("hexstrike", "6.0")
+    assert [t["name"] for t in listing.tools] == ["a", "b"]

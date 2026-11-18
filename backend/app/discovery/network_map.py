@@ -11,15 +11,14 @@ from typing import Any
 from sqlalchemy import select
 
 from app.db.session import Databases
-from app.discovery.network_scanner import MAX_HOSTS_PER_SCAN
+from app.discovery.network_scanner import MAX_HOSTS_PER_SCAN, host_count
 from app.domain.enums import HealthStatus
 from app.domain.models import Device, DeviceAddress, Network
 
 
 async def build_network_map(databases: Databases, network: Network) -> dict[str, Any]:
     net = ipaddress.ip_network(network.cidr, strict=False)
-    hosts = list(net.hosts())
-    total = len(hosts)
+    total = host_count(net)
 
     if total > MAX_HOSTS_PER_SCAN:
         summary = await _status_summary(databases, network.id)
@@ -40,7 +39,7 @@ async def build_network_map(databases: Databases, network: Network) -> dict[str,
         )
         device_by_ip = {ip: device for ip, device in result.all()}
 
-    addresses = [_address_cell(str(host), device_by_ip.get(str(host))) for host in hosts]
+    addresses = [_address_cell(str(host), device_by_ip.get(str(host))) for host in net.hosts()]
     return {
         "network_id": network.id,
         "cidr": network.cidr,

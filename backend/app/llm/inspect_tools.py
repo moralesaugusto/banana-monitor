@@ -25,6 +25,7 @@ from app.integrations.generic_ssh.exec import SshExecError, run_command
 from app.integrations.proxmox.client import ProxmoxClient
 from app.integrations.proxmox.plugin import ProxmoxConfig, resolve_token_id
 from app.integrations.windows_winrm.plugin import run_powershell
+from app.llm import credential_pool
 from app.llm.inspect_policy import (
     WINDOWS_OUTPUT_SUFFIX,
     PolicyError,
@@ -63,6 +64,12 @@ def _schema(name: str, description: str, properties: dict[str, Any], required: l
 
 
 _ID = {"type": "integer", "description": "integration_id from list_inspect_targets"}
+_HOST = {
+    "type": "string",
+    "description": "Instead of integration_id: the host's IP address or device name. A stored credential is "
+    "then chosen for you (the integration bound to that host first, then your credential pool).",
+}
+_PORT = {"type": "integer", "description": "With host: the port, if not the service's usual one."}
 
 SCHEMAS: list[dict[str, Any]] = [
     _schema(
@@ -84,8 +91,8 @@ SCHEMAS: list[dict[str, Any]] = [
         "check-update/list/info, dpkg -l, rpm -q, crontab -l. On a Windows host (os_kind windows): one "
         "read-only Get- PowerShell cmdlet, same allowlist and syntax as winrm_readonly. Secret files are "
         "refused on either OS.",
-        {"integration_id": _ID, "command": {"type": "string"}},
-        ["integration_id", "command"],
+        {"integration_id": _ID, "host": _HOST, "port": _PORT, "command": {"type": "string"}},
+        ["command"],
     ),
     _schema(
         "winrm_readonly",
@@ -93,16 +100,16 @@ SCHEMAS: list[dict[str, Any]] = [
         "'Get-WinEvent -LogName Security -MaxEvents 50'. No pipes, quotes, variables or script "
         "blocks; output is "
         "plain text. Only a fixed list of Get- cmdlets is allowed.",
-        {"integration_id": _ID, "command": {"type": "string"}},
-        ["integration_id", "command"],
+        {"integration_id": _ID, "host": _HOST, "port": _PORT, "command": {"type": "string"}},
+        ["command"],
     ),
     _schema(
         "proxmox_get",
         "Read a Proxmox VE API path (GET only), e.g. /nodes/pve1/status, /nodes/pve1/qemu, "
         "/nodes/pve1/tasks, "
         "/nodes/pve1/syslog, /nodes/pve1/apt/update, /cluster/resources.",
-        {"integration_id": _ID, "path": {"type": "string"}},
-        ["integration_id", "path"],
+        {"integration_id": _ID, "host": _HOST, "port": _PORT, "path": {"type": "string"}},
+        ["path"],
     ),
     _schema(
         "http_inspect",
@@ -116,8 +123,8 @@ SCHEMAS: list[dict[str, Any]] = [
         "Install pending package updates on a Linux host (apt or dnf) over SSH with sudo. This "
         "CHANGES the host: a "
         "human must approve every call. Run ssh_readonly 'apt list --upgradable' first and say why.",
-        {"integration_id": _ID},
-        ["integration_id"],
+        {"integration_id": _ID, "host": _HOST, "port": _PORT},
+        [],
     ),
 ]
 
@@ -150,7 +157,44 @@ async def _load(
     return integration, credential
 
 
-async def list_inspect_targets(databases: Databases, arguments: dict[str, Any]) -> Any:
+async def _access(
+    databases: Databases,
+    arguments: dict[str, Any],
+    type_key: str,
+    agent_name: str | None,
+    *,
+    mutating: bool = False,
+) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any], str]:
+    """(config, credential, extra result fields, display name) for an integration_id, or - when the agent
+    gave a host - for a credential the pool resolver chose. The credential stays a local variable."""
+    if arguments.get("integration_id") is not None:
+        integration, credential = await _load(databases, arguments["integration_id"], type_key)
+        return integration.config, credential, {}, integration.name
+    host = arguments.get("host")
+    if not host:
+        raise AgentToolError("give integration_id or host")
+    port = arguments.get("port")
+    resolved = await credential_pool.resolve(
+        databases,
+        agent_name,
+        type_key,
+        str(host),
+        mutating=mutating,
+        port=int(port) if port else None,
+    )
+    extra = {"credential_used": {"label": resolved.label, "source": resolved.source}, **resolved.notes}
+    return resolved.config, resolved.credential, extra, resolved.ip
+
+
+def _forget_on_failure(arguments: dict[str, Any], type_key: str, name: str, error: Exception) -> None:
+    """A credential that stopped working must not stay remembered as the one that works."""
+    if arguments.get("integration_id") is None and arguments.get("host"):
+        credential_pool.forget_worked(name, type_key)
+
+
+async def list_inspect_targets(
+    databases: Databases, arguments: dict[str, Any], agent_name: str | None = None
+) -> Any:
     async with databases.app_session_factory() as session:
         integrations = list(
             await session.scalars(
@@ -196,16 +240,20 @@ async def list_inspect_targets(databases: Databases, arguments: dict[str, Any]) 
         for s in services
         if (s.config or {}).get("url")
     ]
-    return {"integrations": targets, "web_services": web}
+    return {
+        "integrations": targets,
+        "web_services": web,
+        "credential_pool": await credential_pool.pool_summary(databases, agent_name),
+    }
 
 
 def _command(arguments: dict[str, Any]) -> str:
     return str(arguments.get("command") or "")
 
 
-async def ssh_readonly(databases: Databases, arguments: dict[str, Any]) -> Any:
-    integration, credential = await _load(databases, arguments.get("integration_id"), "generic_ssh")
-    os_family = integration.config.get("os_family") or "linux"
+async def ssh_readonly(databases: Databases, arguments: dict[str, Any], agent_name: str | None = None) -> Any:
+    config, credential, extra, name = await _access(databases, arguments, "generic_ssh", agent_name)
+    os_family = config.get("os_family") or "linux"
     remote_command: str
     if os_family == "windows":
         # Win32-OpenSSH's default remote shell is cmd.exe, so a PowerShell cmdlet needs an explicit
@@ -228,37 +276,51 @@ async def ssh_readonly(databases: Databases, arguments: dict[str, Any]) -> Any:
             raise AgentToolError(str(exc)) from exc
         remote_command = command
     try:
-        status, stdout, stderr = await run_command(integration.config, credential, remote_command)
+        status, stdout, stderr = await run_command(config, credential, remote_command)
     except SshExecError as exc:
+        _forget_on_failure(arguments, "generic_ssh", name, exc)
         raise AgentToolError(str(exc)) from exc
-    return {"command": command, "exit_status": status, "stdout": truncate(stdout), "stderr": truncate(stderr)}
+    return {
+        "command": command,
+        "exit_status": status,
+        "stdout": truncate(stdout),
+        "stderr": truncate(stderr),
+        **extra,
+    }
 
 
-async def winrm_readonly(databases: Databases, arguments: dict[str, Any]) -> Any:
+async def winrm_readonly(
+    databases: Databases, arguments: dict[str, Any], agent_name: str | None = None
+) -> Any:
     try:
         command = check_windows(_command(arguments))
     except PolicyError as exc:
         raise AgentToolError(str(exc)) from exc
-    integration, credential = await _load(databases, arguments.get("integration_id"), "windows_winrm")
-    if not integration.config.get("host"):
+    config, credential, extra, name = await _access(databases, arguments, "windows_winrm", agent_name)
+    if not config.get("host"):
         raise AgentToolError("this integration has no host configured yet (it's a credential wallet entry)")
     try:
-        status, stdout, stderr = await run_powershell(
-            integration.config, credential, command + WINDOWS_OUTPUT_SUFFIX
-        )
+        status, stdout, stderr = await run_powershell(config, credential, command + WINDOWS_OUTPUT_SUFFIX)
     except Exception as exc:  # pywinrm raises requests/winrm/OS errors; none may carry the credential
+        _forget_on_failure(arguments, "windows_winrm", name, exc)
         raise AgentToolError(f"winrm failed: {type(exc).__name__}") from exc
-    return {"command": command, "exit_status": status, "stdout": truncate(stdout), "stderr": truncate(stderr)}
+    return {
+        "command": command,
+        "exit_status": status,
+        "stdout": truncate(stdout),
+        "stderr": truncate(stderr),
+        **extra,
+    }
 
 
-async def proxmox_get(databases: Databases, arguments: dict[str, Any]) -> Any:
+async def proxmox_get(databases: Databases, arguments: dict[str, Any], agent_name: str | None = None) -> Any:
     try:
         path = check_proxmox_path(str(arguments.get("path") or ""))
     except PolicyError as exc:
         raise AgentToolError(str(exc)) from exc
-    integration, credential = await _load(databases, arguments.get("integration_id"), "proxmox")
-    cfg = ProxmoxConfig.model_validate(integration.config)
-    token_id = resolve_token_id(integration.config, credential)
+    config, credential, extra, name = await _access(databases, arguments, "proxmox", agent_name)
+    cfg = ProxmoxConfig.model_validate(config)
+    token_id = resolve_token_id(config, credential)
     if cfg.host is None or token_id is None:
         raise AgentToolError("this integration has no host configured yet (it's a credential wallet entry)")
     client = ProxmoxClient(
@@ -273,8 +335,9 @@ async def proxmox_get(databases: Databases, arguments: dict[str, Any]) -> Any:
     try:
         data = await client.get(path)
     except httpx.HTTPError as exc:
+        _forget_on_failure(arguments, "proxmox", name, exc)
         raise AgentToolError(f"proxmox request failed: {type(exc).__name__}") from exc
-    return {"path": path, "data": truncate(json.dumps(data, default=str))}
+    return {"path": path, "data": truncate(json.dumps(data, default=str)), **extra}
 
 
 async def _certificate(url: str) -> dict[str, Any] | None:
@@ -310,7 +373,7 @@ async def _certificate(url: str) -> dict[str, Any] | None:
     }
 
 
-async def http_inspect(databases: Databases, arguments: dict[str, Any]) -> Any:
+async def http_inspect(databases: Databases, arguments: dict[str, Any], agent_name: str | None = None) -> Any:
     try:
         service_id = int(arguments.get("service_id"))  # type: ignore[arg-type]
     except (TypeError, ValueError) as exc:
@@ -347,10 +410,14 @@ async def http_inspect(databases: Databases, arguments: dict[str, Any]) -> Any:
     }
 
 
-async def apply_updates(databases: Databases, arguments: dict[str, Any]) -> Any:
-    integration, credential = await _load(databases, arguments.get("integration_id"), "generic_ssh")
+async def apply_updates(
+    databases: Databases, arguments: dict[str, Any], agent_name: str | None = None
+) -> Any:
+    config, credential, extra, name = await _access(
+        databases, arguments, "generic_ssh", agent_name, mutating=True
+    )
     try:
-        _, manager, _ = await run_command(integration.config, credential, _DETECT_MANAGER)
+        _, manager, _ = await run_command(config, credential, _DETECT_MANAGER)
         manager = manager.strip()
         if manager not in _UPDATE_COMMANDS:
             raise AgentToolError("no supported package manager (apt or dnf) found")
@@ -360,20 +427,22 @@ async def apply_updates(databases: Databases, arguments: dict[str, Any]) -> Any:
                     source="ai",
                     severity=EventSeverity.WARNING,
                     category="ai_change",
-                    message=f"Package updates ({manager}) started by an agent on {integration.name}",
+                    message=f"Package updates ({manager}) started by an agent on {name}",
                 )
             )
             await session.commit()
         status, stdout, stderr = await run_command(
-            integration.config, credential, _UPDATE_COMMANDS[manager], UPDATE_TIMEOUT_SECONDS
+            config, credential, _UPDATE_COMMANDS[manager], UPDATE_TIMEOUT_SECONDS
         )
     except SshExecError as exc:
+        _forget_on_failure(arguments, "generic_ssh", name, exc)
         raise AgentToolError(str(exc)) from exc
     return {
         "package_manager": manager,
         "exit_status": status,
         "stdout_tail": truncate(stdout[-3000:]),
         "stderr_tail": truncate(stderr[-1000:]),
+        **extra,
     }
 
 

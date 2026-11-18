@@ -5,7 +5,15 @@ import { useServices } from '../api/services'
 import { AlertStateBadge } from '../components/AlertStateBadge'
 import { Card } from '../components/Card'
 import { HealthGauge, HealthRadar } from '../components/HealthGauge'
-import { AlertsIcon, DevicesIcon, IntegrationsIcon, ServicesIcon } from '../components/icons'
+import {
+  AlertsIcon,
+  DevicesIcon,
+  DiscoveryIcon,
+  EventsIcon,
+  IntegrationsIcon,
+  ServicesIcon,
+  SparkIcon,
+} from '../components/icons'
 import { PageHeader } from '../components/PageHeader'
 import { StatusBadge } from '../components/StatusBadge'
 import { SummaryTile } from '../components/SummaryTile'
@@ -23,9 +31,19 @@ function healthScore(data: Overview): number {
   return parts.length === 0 ? 100 : Math.round(parts.reduce((a, b) => a + b, 0) / parts.length)
 }
 
-function Panel({ title, to, children }: { title: string; to?: string; children: React.ReactNode }) {
+function Panel({
+  title,
+  to,
+  children,
+  className = '',
+}: {
+  title: string
+  to?: string
+  children: React.ReactNode
+  className?: string
+}) {
   return (
-    <Card className="p-4">
+    <Card className={`p-4 ${className}`}>
       <div className="mb-3 flex items-center justify-between">
         <h2 className="text-base font-medium text-fg">{title}</h2>
         {to && (
@@ -58,11 +76,91 @@ function Strip({ label, buckets, pick }: { label: string; buckets: HealthBucket[
   )
 }
 
+const CAPABILITIES = [
+  {
+    to: '/discovery',
+    icon: DiscoveryIcon,
+    title: 'Find',
+    text: 'Scans your networks and proposes new devices and services. Nothing is added until you review it.',
+  },
+  {
+    to: '/integrations',
+    icon: IntegrationsIcon,
+    title: 'Connect',
+    text: 'Reads richer detail over SSH, from Proxmox VE, and through HTTP or TCP checks. Credentials are stored encrypted.',
+  },
+  {
+    to: '/devices',
+    icon: DevicesIcon,
+    title: 'Watch',
+    text: 'Polls every device and service on a schedule and keeps their status, latency and history.',
+  },
+  {
+    to: '/alerts',
+    icon: AlertsIcon,
+    title: 'Alert',
+    text: 'Raises an alert only when a problem persists, so a flapping service does not flood you.',
+  },
+  {
+    to: '/events',
+    icon: EventsIcon,
+    title: 'Explain',
+    text: 'Records every status change, alert and discovery as an event, so you can see what happened and when.',
+  },
+  {
+    to: '/ai',
+    icon: SparkIcon,
+    title: 'Investigate',
+    text: 'Optional AI agents explore the network, record what they learn, and write reports you can read.',
+  },
+]
+
+/** A short, static explanation of what the platform is for and how its parts fit together. */
+function AboutSystem() {
+  return (
+    <Card className="mt-6 p-5">
+      <h2 className="text-base font-semibold">What Banana does</h2>
+      <p className="mt-0.5 text-xs text-fg-subtle">
+        <span className="font-medium text-fg-muted">B</span>uilt-in <span className="font-medium text-fg-muted">A</span>lerting
+        for <span className="font-medium text-fg-muted">N</span>etworks, <span className="font-medium text-fg-muted">A</span>
+        ppliances, <span className="font-medium text-fg-muted">N</span>odes and <span className="font-medium text-fg-muted">A</span>pps
+      </p>
+      <p className="mt-1 max-w-3xl text-sm text-fg-muted">
+        Banana is a self-hosted monitor for your home network. It discovers what is on the LAN, checks that it is working,
+        and tells you when it is not and why. It runs as one process on a machine you own, and your data and credentials
+        never leave it.
+      </p>
+      <div className="mt-4 grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
+        {CAPABILITIES.map((item) => (
+          <Link
+            key={item.title}
+            to={item.to}
+            className="group flex gap-3 rounded-control border border-line p-3 transition-colors hover:bg-fg-subtle/10"
+          >
+            <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full border border-line text-fg-muted group-hover:text-fg">
+              <item.icon className="h-[18px] w-[18px]" />
+            </span>
+            <span>
+              <span className="block text-sm font-medium">{item.title}</span>
+              <span className="mt-0.5 block text-xs text-fg-muted">{item.text}</span>
+            </span>
+          </Link>
+        ))}
+      </div>
+      <p className="mt-4 text-xs text-fg-subtle">
+        The dashboard below summarizes the current state: the health score, what needs attention, and the last 24 hours.
+        Start with Discovery if the network is not set up yet.
+      </p>
+    </Card>
+  )
+}
+
 export function OverviewPage() {
   const { data, isLoading } = useOverview()
   return (
     <div>
       <PageHeader title="Overview" description="What's broken right now, and why." />
+      <AboutSystem />
       {isLoading || !data ? <p className="mt-6 text-fg-muted">Loading…</p> : <Dashboard data={data} />}
     </div>
   )
@@ -99,8 +197,8 @@ function Dashboard({ data }: { data: Overview }) {
   const slowest = (services ?? []).filter((s) => s.status === 'up' && s.last_latency_ms != null).slice(0, 5)
 
   return (
-    <div className="mt-6 grid gap-4 lg:grid-cols-[20rem_1fr]">
-      <Card className="flex flex-col items-center gap-2 p-4">
+    <div className="mt-6 grid grid-cols-1 gap-4 lg:grid-cols-4">
+      <Card className="flex flex-col items-center gap-2 p-4 lg:col-span-2">
         <HealthGauge score={healthScore(data)} />
         <p className="px-2 text-center text-xs text-fg-muted">
           Average of device health and service health. Each is the share of checked items that are up, with a degraded one
@@ -132,84 +230,82 @@ function Dashboard({ data }: { data: Overview }) {
         </div>
       </Card>
 
-      <div className="flex min-w-0 flex-col gap-4">
-        <Panel title="24h health trend">
-          <div className="flex flex-col gap-2">
-            <Strip label="Devices" buckets={trend?.buckets ?? []} pick={(b) => b.devices} />
-            <Strip label="Services" buckets={trend?.buckets ?? []} pick={(b) => b.services} />
-          </div>
-          <p className="mt-2 text-xs text-fg-subtle">Share of checks that succeeded in each hour; grey means nothing was checked.</p>
-        </Panel>
+      <Card className="self-start p-4 lg:col-span-2">
+        <h2 className="mb-3 text-base font-medium">Network overview</h2>
+        <div className="grid grid-cols-2 gap-4">
+          <SummaryTile icon={<DevicesIcon className="h-5 w-5" />} label="Devices" value={data.devices.up + data.devices.down + data.devices.degraded + data.devices.unknown} />
+          <SummaryTile icon={<ServicesIcon className="h-5 w-5" />} label="Services" value={data.services.up + data.services.down + data.services.degraded + data.services.unknown} />
+          <SummaryTile icon={<IntegrationsIcon className="h-5 w-5" />} label="Integrations" value={integrationTotal} tone={data.integrations_error > 0 ? 'bad' : 'neutral'} />
+          <SummaryTile icon={<AlertsIcon className="h-5 w-5" />} label="Firing" value={firing.length} tone={firing.length > 0 ? 'bad' : 'ok'} />
+        </div>
+      </Card>
 
-        <Card className="grid gap-6 p-4 md:grid-cols-3">
-          <div>
-            <h2 className="mb-3 text-base font-medium">Network overview</h2>
-            <div className="grid grid-cols-2 gap-4">
-              <SummaryTile icon={<DevicesIcon className="h-5 w-5" />} label="Devices" value={data.devices.up + data.devices.down + data.devices.degraded + data.devices.unknown} />
-              <SummaryTile icon={<ServicesIcon className="h-5 w-5" />} label="Services" value={data.services.up + data.services.down + data.services.degraded + data.services.unknown} />
-              <SummaryTile icon={<IntegrationsIcon className="h-5 w-5" />} label="Integrations" value={integrationTotal} tone={data.integrations_error > 0 ? 'bad' : 'neutral'} />
-              <SummaryTile icon={<AlertsIcon className="h-5 w-5" />} label="Firing" value={firing.length} tone={firing.length > 0 ? 'bad' : 'ok'} />
-            </div>
-          </div>
-          <div>
-            <h2 className="mb-3 flex items-center justify-between text-base font-medium">
-              Needs attention
-              <Link to="/devices" className="text-xs font-normal text-fg-muted hover:text-accent-strong">
-                More ›
-              </Link>
-            </h2>
-            {broken.length === 0 ? (
-              <p className="py-4 text-sm text-fg-muted">Nothing is down or degraded.</p>
-            ) : (
-              <ul className="divide-y divide-line text-sm">
-                {broken.map((item) => (
-                  <li key={item.key} className="flex items-center justify-between gap-2 py-2">
-                    <Link to={item.to} className="min-w-0 truncate hover:underline">
-                      {item.name}
-                      <span className="ml-1 text-xs text-fg-subtle">{item.kind}</span>
-                    </Link>
-                    <StatusBadge status={item.status} />
-                  </li>
-                ))}
-              </ul>
-            )}
-          </div>
-          <div>
-            <h2 className="mb-3 flex items-center justify-between text-base font-medium">
-              Slowest services
-              <Link to="/services" className="text-xs font-normal text-fg-muted hover:text-accent-strong">
-                More ›
-              </Link>
-            </h2>
-            {slowest.length === 0 ? (
-              <p className="py-4 text-sm text-fg-muted">No latency data yet.</p>
-            ) : (
-              <ul className="divide-y divide-line text-sm">
-                {slowest.map((service) => (
-                  <li key={service.id} className="flex items-center justify-between gap-2 py-2">
-                    <span className="min-w-0 truncate">{service.name}</span>
-                    <span className="font-mono text-xs tabular-nums text-fg-muted">{service.last_latency_ms?.toFixed(0)} ms</span>
-                  </li>
-                ))}
-              </ul>
-            )}
-          </div>
-        </Card>
+      <Panel title="24h health trend" className="lg:col-span-4">
+        <div className="flex flex-col gap-2">
+          <Strip label="Devices" buckets={trend?.buckets ?? []} pick={(b) => b.devices} />
+          <Strip label="Services" buckets={trend?.buckets ?? []} pick={(b) => b.services} />
+        </div>
+        <p className="mt-2 text-xs text-fg-subtle">Share of checks that succeeded in each hour; grey means nothing was checked.</p>
+      </Panel>
 
-        <Panel title="Recent events" to="/events">
-          {data.recent_events.length === 0 ? (
-            <p className="text-sm text-fg-muted">No events yet.</p>
-          ) : (
-            <ul className="divide-y divide-line text-sm">
-              {data.recent_events.map((event) => (
-                <li key={event.id} className="py-2">
-                  <span className="font-mono text-xs text-fg-muted">{new Date(event.ts).toLocaleTimeString()}</span> {event.message}
-                </li>
-              ))}
-            </ul>
-          )}
-        </Panel>
-      </div>
+      <Card className="p-4 lg:col-span-2">
+        <h2 className="mb-3 flex items-center justify-between text-base font-medium">
+          Needs attention
+          <Link to="/devices" className="text-xs font-normal text-fg-muted hover:text-accent-strong">
+            More ›
+          </Link>
+        </h2>
+        {broken.length === 0 ? (
+          <p className="py-4 text-sm text-fg-muted">Nothing is down or degraded.</p>
+        ) : (
+          <ul className="divide-y divide-line text-sm">
+            {broken.map((item) => (
+              <li key={item.key} className="flex items-center justify-between gap-2 py-2">
+                <Link to={item.to} className="min-w-0 truncate hover:underline">
+                  {item.name}
+                  <span className="ml-1 text-xs text-fg-subtle">{item.kind}</span>
+                </Link>
+                <StatusBadge status={item.status} />
+              </li>
+            ))}
+          </ul>
+        )}
+      </Card>
+
+      <Card className="p-4 lg:col-span-2">
+        <h2 className="mb-3 flex items-center justify-between text-base font-medium">
+          Slowest services
+          <Link to="/services" className="text-xs font-normal text-fg-muted hover:text-accent-strong">
+            More ›
+          </Link>
+        </h2>
+        {slowest.length === 0 ? (
+          <p className="py-4 text-sm text-fg-muted">No latency data yet.</p>
+        ) : (
+          <ul className="divide-y divide-line text-sm">
+            {slowest.map((service) => (
+              <li key={service.id} className="flex items-center justify-between gap-2 py-2">
+                <span className="min-w-0 truncate">{service.name}</span>
+                <span className="font-mono text-xs tabular-nums text-fg-muted">{service.last_latency_ms?.toFixed(0)} ms</span>
+              </li>
+            ))}
+          </ul>
+        )}
+      </Card>
+
+      <Panel title="Recent events" to="/events" className="lg:col-span-4">
+        {data.recent_events.length === 0 ? (
+          <p className="text-sm text-fg-muted">No events yet.</p>
+        ) : (
+          <ul className="divide-y divide-line text-sm">
+            {data.recent_events.map((event) => (
+              <li key={event.id} className="py-2">
+                <span className="font-mono text-xs text-fg-muted">{new Date(event.ts).toLocaleTimeString()}</span> {event.message}
+              </li>
+            ))}
+          </ul>
+        )}
+      </Panel>
     </div>
   )
 }

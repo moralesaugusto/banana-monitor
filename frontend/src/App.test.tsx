@@ -20,7 +20,7 @@ describe('App', () => {
     expect(await screen.findByText('Platform healthy')).toBeInTheDocument()
   })
 
-  it('expands the Integrations sub-menu and navigates to its new pages', async () => {
+  it('opens Credentials & Keys as one page with Credentials and How it works reachable from it', async () => {
     server.use(
       http.get('/api/integrations/types', () => HttpResponse.json([])),
       http.get('/api/credentials', () => HttpResponse.json([])),
@@ -30,14 +30,14 @@ describe('App', () => {
     render(<App />)
     await screen.findByRole('heading', { name: 'Overview' })
 
-    await user.click(screen.getByRole('button', { name: 'Integrations' }))
+    await user.click(screen.getByRole('link', { name: 'Credentials & Keys' }))
+    expect(await screen.findByRole('heading', { name: 'Credentials & Keys' })).toBeInTheDocument()
+    expect(await screen.findByText('No integrations configured yet.')).toBeInTheDocument()
+
     await user.click(screen.getByRole('link', { name: 'Credentials' }))
-    expect(await screen.findByRole('heading', { name: 'Credentials' })).toBeInTheDocument()
+    expect(await screen.findByText('No credentials saved yet.')).toBeInTheDocument()
 
     await user.click(screen.getByRole('link', { name: 'How it works' }))
     expect(await screen.findByRole('heading', { name: 'How integrations work' })).toBeInTheDocument()
-
-    await user.click(screen.getByRole('link', { name: 'Configured' }))
-    expect(await screen.findByRole('heading', { name: 'Integrations' })).toBeInTheDocument()
   })
 })

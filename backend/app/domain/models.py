@@ -40,9 +40,7 @@ def utcnow() -> datetime.datetime:
 
 class TimestampMixin:
     created_at: Mapped[datetime.datetime] = mapped_column(UTCDateTime(), default=utcnow)
-    updated_at: Mapped[datetime.datetime] = mapped_column(
-        UTCDateTime(), default=utcnow, onupdate=utcnow
-    )
+    updated_at: Mapped[datetime.datetime] = mapped_column(UTCDateTime(), default=utcnow, onupdate=utcnow)
 
 
 class Site(Base, TimestampMixin):
@@ -376,6 +374,12 @@ class AiModeSettings(Base, TimestampMixin):
     """OpenRouter API key (an opaque reference into credentials.db); unused for Ollama."""
     usage_reset_at: Mapped[datetime.datetime | None] = mapped_column(UTCDateTime(), default=None)
     """When the token counters (LlmUsage) were last reset; None if never."""
+    cost_budget_usd: Mapped[float | None] = mapped_column(default=None)
+    """None/0 means no budget. Alert-only (see docs/decisions.md): crossing it never blocks a run,
+    it only pushes one Telegram notification (api.ai_cost, app.llm.usage.check_cost_budget)."""
+    cost_budget_alert_sent: Mapped[bool] = mapped_column(default=False)
+    """Set once the budget is crossed, so the notification fires only once per period - cleared by
+    resetting the usage counters or by changing the budget itself."""
     max_iterations: Mapped[int] = mapped_column(default=30)
     """A multi-host LAN scan (discoverer's own use of this) easily needs more than a few
     model-call turns; 15 was observed cutting a 7-host scan off before it finished."""
@@ -407,10 +411,28 @@ class AiModeSettings(Base, TimestampMixin):
     undefined_scan_max_hosts: Mapped[int] = mapped_column(default=256)
     """Host-count cap for one of those out-of-network sweeps - deliberately smaller than
     network_scanner.MAX_HOSTS_PER_SCAN (1024), since this range was never vetted by an administrator."""
+    allow_public_targets: Mapped[bool] = mapped_column(default=False)
+    """A further, more dangerous relaxation on top of allow_undefined_network_scan: lets a single-target
+    tool (run_nmap/run_nc/record_service/report_open_ports/submit_http_form, and a custom tool's
+    target/ip/host) be pointed at a publicly routable address, not just a private one - this is attack
+    surface on someone else's network, so it requires an explicit, disclaimed opt-in. Both switches must
+    be on; off by default. Deliberately does NOT extend to discover_hosts - sweeping a public CIDR is a
+    mass-scanning capability this setting is not meant to grant."""
+    cred_allow_unlisted_hosts: Mapped[bool] = mapped_column(default=False)
+    """Credential-pool safeguard (llm/credential_pool.py): off confines credential tries to loopback, a
+    configured Network or a known Device. On: any private address. Public addresses additionally need
+    allow_undefined_network_scan and allow_public_targets, whatever this says."""
+    cred_no_attempt_limit: Mapped[bool] = mapped_column(default=False)
+    """Safeguard: off caps tries at credential_pool.MAX_ATTEMPTS_PER_HOST per host per window (lockouts)."""
+    cred_trust_new_host_keys: Mapped[bool] = mapped_column(default=False)
+    """Safeguard: off means a pool credential is only sent to an SSH host whose key was approved/pinned.
+    On: an unseen key is trusted on first use, so a password goes out before the host is verified."""
+    cred_pool_for_updates: Mapped[bool] = mapped_column(default=False)
+    """Safeguard: off keeps apply_updates to host-bound or explicitly selected credentials."""
     ollama_max_concurrent_calls: Mapped[int] = mapped_column(default=2)
     """Caps in-flight model calls to an Ollama host across every agent in a run at once - a single
     consumer GPU serializes requests anyway, and more in-flight calls just means longer waits per call
-    and a higher chance of a hang under load (see docs/qa/ai-run-findings.md, runs 10-11)."""
+    and a higher chance of a hang under load."""
     openrouter_max_concurrent_calls: Mapped[int] = mapped_column(default=4)
     """Same cap for OpenRouter - a hosted API that can sustain more concurrent requests than a home GPU."""
     form_tool_seeded: Mapped[bool] = mapped_column(default=False)
@@ -443,10 +465,55 @@ class AiModeSettings(Base, TimestampMixin):
     to condense every agent-topic result into a real report instead of just acknowledging a routine
     reviewer/discoverer pass) if its prompt was never edited - same one-shot pattern as
     security_agents_seeded."""
+    run_reports_seeded: Mapped[bool] = mapped_column(default=False)
+    """bellaco and sinverguenza get record_finding added to their tools once, and bellaco, sinverguenza and
+    reporter have their prompts upgraded for per-network run reports if never edited - same one-shot
+    pattern as security_agents_seeded."""
     tajonaso_seeded: Mapped[bool] = mapped_column(default=False)
     """The tajonaso agent and its ~150 HexStrike AI custom tools are created once from
     scripts/hexstrike_tools.json - same one-shot pattern as security_agents_seeded. A renamed or
     deleted tajonaso, or a tool an administrator already edited, is left alone on any later start."""
+    knowledge_base_enabled: Mapped[bool] = mapped_column(default=False)
+    """Master switch for the embedded agent knowledge base (knowledge.db): off by default, same role
+    as DiscoverySettings.agent_internet_blocked but inverted (that one is a kill switch that defaults
+    permissive; this one is a feature switch that defaults off). Checked in llm/agent_tools.dispatch()
+    before search_knowledge/add_knowledge_entry run, regardless of an agent's own enabled_tools."""
+    knowledge_embedding_base_url: Mapped[str] = mapped_column(default="")
+    """Empty means: use llm_base_url (the same Ollama-compatible host agents already call for chat).
+    Set this only when embeddings should come from a different host/provider than chat does."""
+    knowledge_embedding_model: Mapped[str] = mapped_column(default="nomic-embed-text")
+    knowledge_embedding_credential_id: Mapped[int | None] = mapped_column(default=None)
+    """An API key credential for the embedding host, same credential store as llm_credential_id.
+    Empty/None means no Authorization header is sent - fine for a local Ollama host, but a
+    credentialed embedding provider (e.g. pointing this at OpenRouter) needs one set or every call
+    401s. Not an OpenRouter-only field despite sharing that credential store: any OpenAI-compatible
+    /embeddings endpoint that needs a bearer token uses this the same way."""
+    knowledge_collections_seeded: Mapped[bool] = mapped_column(default=False)
+    """The default collections (LAN notes, Security knowledge, Sandbox) are created once - same
+    one-shot pattern as security_agents_seeded. A renamed or deleted collection is left alone."""
+    memory_max_entries_per_agent: Mapped[int] = mapped_column(default=50)
+    """Default cap on `remember` notes kept per agent (oldest pruned first); an agent's own
+    memory_max_entries_override (AiAgent) replaces this for that agent when non-zero. Anchored
+    to 2x AiModeSettings.max_targets (default 25 - how many devices one scheduled run sweeps),
+    so memory survives roughly two full scheduled cycles before the oldest notes are pruned -
+    see docs/decisions.md."""
+    memory_max_content_chars: Mapped[int] = mapped_column(default=200)
+    """Default per-note truncation length (~50 tokens): a `remember` note is meant to be one
+    short fact, not a paragraph - see docs/ai-cost-and-models.md's "Agent memory" section for the
+    reasoning (not yet a measured value, a judgement call sized to the tool's own intent). An
+    agent's own memory_max_content_chars_override (AiAgent) replaces this for that agent when
+    non-zero."""
+    memory_max_inject_chars: Mapped[int] = mapped_column(default=4000)
+    """Default total budget of saved-note content injected into an agent's system prompt per
+    message (replaces a fixed note-count limit) - the actual context-window cost of memory.
+    ~1000 tokens, sized to fit about 20 notes at the default per-note length above - raised in
+    proportion to memory_max_entries_per_agent's anchor to max_targets, so a larger retained
+    history is matched by a proportionally larger (not fixed) share actually reaching the model
+    - while staying under 2% of the 64k num_ctx this project runs production models at (see
+    docs/ai-cost-and-models.md) - still a judgement call, not yet a measured one. An agent's own
+    memory_max_inject_chars_override (AiAgent) replaces this when non-zero. The UI shows all
+    three memory size settings as an approximate token count (~4 chars/token); this column itself
+    stays in characters - see docs/decisions.md."""
 
 
 class AiCustomTool(Base, TimestampMixin):
@@ -468,11 +535,25 @@ class AiCustomTool(Base, TimestampMixin):
     parameters: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     """JSON schema shown to the model."""
     enabled: Mapped[bool] = mapped_column(default=True)
+    mcp_server_id: Mapped[int | None] = mapped_column(default=None)
+    """The AiMcpServer this tool was imported from; None for hand-made tools. Not a foreign key: they are
+    not enforced on pooled connections, so deleting a server removes its tools explicitly."""
+
+
+class AiMcpServer(Base, TimestampMixin):
+    """An MCP server whose tools are imported as AiCustomTool rows, so they can be tested, refreshed and
+    removed together. Same minimal client as every MCP tool: streamable HTTP, no authentication."""
+
+    __tablename__ = "ai_mcp_servers"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    name: Mapped[str] = mapped_column(unique=True)
+    url: Mapped[str]
 
 
 class AiGuardrail(Base, TimestampMixin):
-    """A user-defined rule checked against every argument value a custom tool
-    receives: deny_regex blocks on a match, allow_regex blocks on a non-match."""
+    """A user-defined rule checked against every argument value a tool receives: deny_regex blocks on a
+    match, allow_regex blocks on a non-match. Which tools it covers is `applies_to`."""
 
     __tablename__ = "ai_guardrails"
 
@@ -483,6 +564,8 @@ class AiGuardrail(Base, TimestampMixin):
     """'deny_regex' | 'allow_regex'"""
     pattern: Mapped[str]
     enabled: Mapped[bool] = mapped_column(default=True)
+    applies_to: Mapped[str] = mapped_column(default="default", server_default="default")
+    """'default' (custom tools and host-inspection tools) | 'all' (every tool). See llm/guardrail_scope.py."""
 
 
 class AiRun(Base):
@@ -609,9 +692,48 @@ class AiAgent(Base, TimestampMixin):
     enabled: Mapped[bool] = mapped_column(default=True)
     allow_changes: Mapped[bool] = mapped_column(default=False)
     """May hold tools that change a host (inspect_tools.MUTATING_TOOLS); each such call waits for a human."""
+    credential_scope: Mapped[str] = mapped_column(default="bound")
+    """Which stored credentials the host-inspection tools may try: 'bound' (only integrations bound to
+    the target host - the original behavior), 'pool' (also the credential pool) or 'selected' (also, but
+    only the credentials in credential_scope_ids). A host-bound integration always comes first."""
+    credential_scope_ids: Mapped[list[int]] = mapped_column(JSON, default=list)
     workflow_x: Mapped[float | None] = mapped_column(default=None)
     workflow_y: Mapped[float | None] = mapped_column(default=None)
     """Position of this agent's node on the Workflow canvas; None until the user places it."""
+    memory_max_entries_override: Mapped[int] = mapped_column(default=0)
+    """0 uses AiModeSettings.memory_max_entries_per_agent; otherwise this agent's own cap on
+    `remember` notes kept (oldest pruned first) - e.g. a higher budget for an agent that
+    investigates many hosts."""
+    memory_max_content_chars_override: Mapped[int] = mapped_column(default=0)
+    """0 uses AiModeSettings.memory_max_content_chars; otherwise this agent's own per-note
+    truncation length."""
+    memory_max_inject_chars_override: Mapped[int] = mapped_column(default=0)
+    """0 uses AiModeSettings.memory_max_inject_chars; otherwise this agent's own total injected
+    memory budget."""
+    fallback_provider: Mapped[str] = mapped_column(default="")
+    """'' = no fallback configured | 'ollama' | 'openrouter'. If the primary model call fails, the
+    same call is retried once against this endpoint instead of failing the agent outright. Opt-in,
+    per-agent only - there is no run-wide default fallback."""
+    fallback_base_url: Mapped[str] = mapped_column(default="")
+    fallback_model: Mapped[str] = mapped_column(default="")
+    fallback_credential_id: Mapped[int | None] = mapped_column(default=None)
+
+
+class AiAgentMemory(Base, TimestampMixin):
+    """One note an agent saved about itself (the `remember` tool) for its own future runs.
+
+    Keyed by the agent's `name`, not `AiAgent.id`: the same durable-identifier idiom
+    `settings_snapshot` already uses, so memory reattaches if an agent is deleted and
+    recreated under the same name. Capped per agent at write time (see
+    AiModeSettings.memory_max_entries_per_agent / AiAgent.memory_max_entries_override,
+    resolved by effective_memory_limits in llm/agent_tools.py) so the context injected
+    into every future call stays bounded - see docs/decisions.md."""
+
+    __tablename__ = "ai_agent_memory"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    agent_name: Mapped[str] = mapped_column(index=True)
+    content: Mapped[str] = mapped_column(Text)
 
 
 class AiMessage(Base):
@@ -665,7 +787,37 @@ class Report(Base):
     """The build_snapshot() result current when this report was saved, from whichever path saved it -
     manual, Telegram or an agent. Lets a later report's get_status_delta tool show what changed since
     this one, regardless of which report was last."""
+    run_id: Mapped[int | None] = mapped_column(default=None, index=True)
+    """The AI Mode run that produced this report, for the per-network reports assembled when a run ends."""
+    scope: Mapped[str | None] = mapped_column(default=None)
+    """What the report covers: a network name, 'All networks' or 'Unassigned'. None for a whole-install
+    report (snapshot, Telegram, or the reporter's direct task)."""
     created_at: Mapped[datetime.datetime] = mapped_column(UTCDateTime(), default=utcnow)
+
+
+FINDING_KINDS = ("os", "patch", "vulnerability", "performance", "incident", "other")
+FINDING_SEVERITIES = ("info", "low", "medium", "high", "critical")
+
+
+class HostFinding(Base):
+    """One thing an agent learned about a host that a report should carry: its OS, patch level, a
+    vulnerability, a performance problem or a security incident. Structured so a run's reports are built
+    from the database rather than from whatever an agent last said in prose. `ip` is the key (a host
+    need not be a known Device); `device_id` is filled when it is."""
+
+    __tablename__ = "host_findings"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    run_id: Mapped[int | None] = mapped_column(default=None, index=True)
+    device_id: Mapped[int | None] = mapped_column(default=None)
+    ip: Mapped[str] = mapped_column(index=True)
+    kind: Mapped[str]
+    severity: Mapped[str] = mapped_column(default="info")
+    title: Mapped[str]
+    detail: Mapped[str] = mapped_column(Text, default="")
+    source: Mapped[str] = mapped_column(default="")
+    """The agent that recorded it."""
+    observed_at: Mapped[datetime.datetime] = mapped_column(UTCDateTime(), default=utcnow)
 
 
 class TelegramConfig(Base, TimestampMixin):
@@ -685,6 +837,8 @@ class TelegramConfig(Base, TimestampMixin):
     explicit /report ai, a scheduled run, or an automatic escalation chain like reviewer ->
     bellaco/sinverguenza -> reporter) is pushed to the allowed chats as a PDF. Off still lets a human
     read it from the Reports page; it is not a way to silence that report, only its Telegram push."""
+    notify_cost_budget: Mapped[bool] = mapped_column(default=True)
+    """Whether crossing AiModeSettings.cost_budget_usd pushes a one-time text notification here."""
     last_update_id: Mapped[int] = mapped_column(default=0)
 
 

@@ -7,6 +7,8 @@ function calling, so a single parameterized function covers both - no
 per-provider client classes.
 """
 
+import json
+from collections.abc import AsyncIterator
 from typing import Any
 
 import httpx
@@ -58,6 +60,53 @@ async def call_chat_completions(
             break
         data: dict[str, Any] = response.json()
         return data
+
+
+async def stream_chat_completions(
+    *,
+    base_url: str,
+    api_key: str | None,
+    model: str,
+    messages: list[dict[str, Any]],
+    tools: list[dict[str, Any]] | None = None,
+    timeout: float = DEFAULT_TIMEOUT_SECONDS,
+    temperature: float | None = None,
+) -> AsyncIterator[dict[str, Any]]:
+    """Streams one OpenAI-compatible chat-completions request (`stream: true`), yielding each SSE
+    `data: ...` chunk as a parsed dict, stopping at the terminal `data: [DONE]` line. No retry (unlike
+    call_chat_completions): a mid-stream server error can't be safely replayed since some content may
+    already have been shown to the caller."""
+    headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
+    body: dict[str, Any] = {
+        "model": model,
+        "messages": messages,
+        "stream": True,
+        "stream_options": {"include_usage": True},
+    }
+    if tools:
+        body["tools"] = tools
+    if temperature is not None:
+        body["temperature"] = temperature
+
+    try:
+        async with (
+            httpx.AsyncClient(base_url=base_url, timeout=timeout) as http_client,
+            http_client.stream("POST", "/chat/completions", json=body, headers=headers) as response,
+        ):
+            try:
+                response.raise_for_status()
+            except httpx.HTTPStatusError as exc:
+                raise LLMRequestError(str(exc)) from exc
+            async for line in response.aiter_lines():
+                if not line.startswith("data: "):
+                    continue
+                data = line.removeprefix("data: ")
+                if data == "[DONE]":
+                    break
+                yield json.loads(data)
+    except httpx.HTTPError as exc:
+        detail = str(exc) or f"{type(exc).__name__} (no response within {timeout:.0f}s)"
+        raise LLMRequestError(detail) from exc
 
 
 async def list_models(base_url: str, timeout: float = 5.0) -> list[str]:

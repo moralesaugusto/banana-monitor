@@ -1,13 +1,20 @@
 """Chat-turn orchestration: one user message -> a bounded tool-calling loop
 against the configured LLM -> one persisted assistant reply.
 
-Non-streaming by design (v1): a turn that needs several tool calls is fully
-resolved server-side before anything is returned. Streaming interacting with
-tool-call parsing is real added complexity, deliberately deferred - see
-docs/assistant.md.
+`send_chat_message` is the original non-streaming turn (still used by
+`/assistant/chat`): a turn that needs several tool calls is fully resolved
+server-side before anything is returned.
+
+`send_chat_message_stream` streams the model's own output live over SSE
+(`/assistant/chat/stream`) using `stream_chat_completions`. A tool-calling
+iteration's deltas are content-free (the model emits tool_calls, not visible
+text) so nothing streams during tool dispatch - only a turn's final,
+content-only answer is ever seen arriving live; the tool-calling loop itself
+is otherwise identical to the non-streaming path. See docs/assistant.md.
 """
 
 import json
+from collections.abc import AsyncIterator
 from typing import Any
 
 from sqlalchemy import delete, select
@@ -18,32 +25,19 @@ from app.db.session import Databases
 from app.domain.bootstrap import ensure_default_assistant_config
 from app.domain.enums import AssistantMessageRole, AssistantProvider
 from app.domain.models import AssistantConfig, AssistantMessage, utcnow
-from app.llm.client import LLMRequestError, call_chat_completions
+from app.llm.client import LLMRequestError, call_chat_completions, stream_chat_completions
 from app.llm.tools import READ_ONLY_TOOL_SCHEMAS, TOOL_SCHEMAS, ToolExecutionError, dispatch_tool_call
 from app.llm.usage import record_usage
 from app.logging_setup import get_logger
+from app.prompts import load_prompt
 
 logger = get_logger(__name__)
 
 HISTORY_MESSAGE_LIMIT = 20
 
-SYSTEM_PROMPT_BASE = (
-    "You are an assistant embedded in a LAN monitoring platform. You can read "
-    "current device/service/alert/discovery state. You cannot delete anything "
-    "and cannot touch credentials, integration configuration or any system/"
-    "platform setting - if asked, say those must be changed manually in the UI. "
-    "Be concise."
-)
-SYSTEM_PROMPT_READ_ONLY = SYSTEM_PROMPT_BASE + (
-    " You are currently in read-only mode: you have no write tools at all, only "
-    "read ones. If asked to change something, say that full access (god mode) "
-    "must be turned on first, under AI Mode > Settings > Chat assistant."
-)
-SYSTEM_PROMPT_FULL_ACCESS = SYSTEM_PROMPT_BASE + (
-    " Full access is on: you may also perform the curated safe write actions "
-    "your tools expose (accept/ignore a discovery candidate, create or update a "
-    "service, update a device, trigger a scan, enable/disable an alert rule)."
-)
+SYSTEM_PROMPT_BASE = load_prompt("assistant_base")
+SYSTEM_PROMPT_READ_ONLY = SYSTEM_PROMPT_BASE + " " + load_prompt("assistant_read_only_suffix")
+SYSTEM_PROMPT_FULL_ACCESS = SYSTEM_PROMPT_BASE + " " + load_prompt("assistant_full_access_suffix")
 
 
 class AssistantService:
@@ -177,3 +171,139 @@ class AssistantService:
         await session.commit()
         await session.refresh(reply)
         return reply
+
+    async def send_chat_message_stream(
+        self,
+        session: AsyncSession,
+        credentials_session: AsyncSession,
+        credential_service: CredentialService,
+        user_text: str,
+    ) -> AsyncIterator[dict[str, Any]]:
+        """Yields `{"delta": str}` for each content token of the turn's final, content-only answer,
+        then exactly one `{"message": {...}}` (the persisted AssistantMessage, same shape
+        AssistantMessageRead.model_validate produces) - or, on an LLM failure, one `{"error": str}`
+        with nothing persisted. See the module docstring for what does and doesn't stream."""
+        config = await self.get_config(session)
+        try:
+            api_key = await self._resolve_api_key(credentials_session, credential_service, config)
+        except LLMRequestError as exc:
+            yield {"error": str(exc)}
+            return
+
+        history = await self._recent_history(session)
+        messages: list[dict[str, Any]] = [
+            {
+                "role": "system",
+                "content": SYSTEM_PROMPT_FULL_ACCESS if config.full_access else SYSTEM_PROMPT_READ_ONLY,
+            },
+            *history,
+            {"role": "user", "content": user_text},
+        ]
+
+        tool_calls_made: list[dict[str, Any]] = []
+        final_text = ""
+
+        try:
+            for _ in range(config.max_tool_iterations):
+                content_parts: list[str] = []
+                tool_call_parts: dict[int, dict[str, str]] = {}
+                prompt_tokens = completion_tokens = 0
+
+                async for chunk in stream_chat_completions(
+                    base_url=config.base_url,
+                    api_key=api_key,
+                    model=config.model,
+                    messages=messages,
+                    tools=TOOL_SCHEMAS if config.full_access else READ_ONLY_TOOL_SCHEMAS,
+                    timeout=config.llm_timeout_seconds,
+                ):
+                    usage = chunk.get("usage")
+                    if usage:
+                        prompt_tokens = int(usage.get("prompt_tokens") or 0)
+                        completion_tokens = int(usage.get("completion_tokens") or 0)
+                    choices = chunk.get("choices") or []
+                    if not choices:
+                        continue
+                    delta = choices[0].get("delta") or {}
+                    if delta.get("content"):
+                        content_parts.append(delta["content"])
+                        yield {"delta": delta["content"]}
+                    for tc in delta.get("tool_calls") or []:
+                        empty_slot = {"id": "", "name": "", "arguments": ""}
+                        slot = tool_call_parts.setdefault(tc.get("index", 0), empty_slot)
+                        if tc.get("id"):
+                            slot["id"] = tc["id"]
+                        fn = tc.get("function") or {}
+                        if fn.get("name"):
+                            slot["name"] = fn["name"]
+                        if fn.get("arguments"):
+                            slot["arguments"] += fn["arguments"]
+
+                await record_usage(
+                    self._databases,
+                    source="assistant",
+                    agent="chat",
+                    provider=config.provider.value,
+                    model=config.model,
+                    prompt_tokens=prompt_tokens,
+                    completion_tokens=completion_tokens,
+                )
+
+                if not tool_call_parts:
+                    final_text = "".join(content_parts)
+                    break
+
+                assembled: list[dict[str, Any]] = [
+                    {
+                        "id": slot["id"] or f"call_{idx}",
+                        "function": {"name": slot["name"], "arguments": slot["arguments"]},
+                    }
+                    for idx, slot in sorted(tool_call_parts.items())
+                ]
+                messages.append({"role": "assistant", "content": None, "tool_calls": assembled})
+                for call in assembled:
+                    name = call["function"]["name"]
+                    arguments: dict[str, Any] = {}
+                    try:
+                        arguments = json.loads(call["function"]["arguments"] or "{}")
+                        result: Any = await dispatch_tool_call(
+                            self._databases, name, arguments, full_access=config.full_access
+                        )
+                    except (ToolExecutionError, json.JSONDecodeError) as exc:
+                        result = {"error": str(exc)}
+                    tool_calls_made.append({"name": name, "arguments": arguments, "result": result})
+                    messages.append(
+                        {
+                            "role": "tool",
+                            "tool_call_id": call["id"],
+                            "content": json.dumps(result, default=str),
+                        }
+                    )
+            else:
+                final_text = final_text or (
+                    f"Reached the limit of {config.max_tool_iterations} model calls for this turn without a "
+                    "final answer. Raise it under AI Mode > Settings > Chat assistant."
+                )
+        except LLMRequestError as exc:
+            yield {"error": str(exc)}
+            return
+
+        session.add(AssistantMessage(role=AssistantMessageRole.USER, content=user_text, ts=utcnow()))
+        reply = AssistantMessage(
+            role=AssistantMessageRole.ASSISTANT,
+            content=final_text,
+            tool_calls=tool_calls_made or None,
+            ts=utcnow(),
+        )
+        session.add(reply)
+        await session.commit()
+        await session.refresh(reply)
+        yield {
+            "message": {
+                "id": reply.id,
+                "ts": reply.ts.isoformat(),
+                "role": reply.role.value,
+                "content": reply.content,
+                "tool_calls": reply.tool_calls,
+            }
+        }

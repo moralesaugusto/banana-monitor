@@ -1,6 +1,8 @@
-import { useState, type ReactNode } from 'react'
-import { NavLink, useLocation } from 'react-router-dom'
+import { useMemo, useState, type ReactNode } from 'react'
+import { Link, NavLink, useLocation } from 'react-router-dom'
+import { useAiModeSettings } from '../api/aiMode'
 import { useHealth } from '../api/health'
+import { BananaLogo } from './BananaLogo'
 import {
   AlertsIcon,
   ChevronDownIcon,
@@ -12,7 +14,7 @@ import {
   InfoIcon,
   InsightsIcon,
   IntegrationsIcon,
-  LockIcon,
+  KnowledgeIcon,
   LogsIcon,
   MapIcon,
   NetworksIcon,
@@ -66,6 +68,7 @@ const NAV_GROUPS: NavGroup[] = [
       { to: '/alerts', label: 'Alerts', icon: AlertsIcon },
       { to: '/events', label: 'Events', icon: EventsIcon },
       { to: '/reports', label: 'Reports', icon: ReportsIcon },
+      { to: '/ai/runs', label: 'History', icon: EventsIcon },
     ],
   },
   {
@@ -76,10 +79,19 @@ const NAV_GROUPS: NavGroup[] = [
       { to: '/ai/agents', label: 'Agents', icon: InsightsIcon },
       { to: '/ai/messages', label: 'Messages', icon: LogsIcon },
       {
+        label: 'Knowledge',
+        icon: KnowledgeIcon,
+        children: [
+          { to: '/ai/knowledge', label: 'Browse', icon: KnowledgeIcon, end: true },
+          { to: '/ai/knowledge/map', label: 'Map', icon: MapIcon },
+          { to: '/ai/knowledge/settings', label: 'Settings', icon: SettingsIcon },
+          { to: '/ai/knowledge/learn', label: 'How it works', icon: InfoIcon },
+        ],
+      },
+      {
         label: 'AI Settings',
         icon: ToolsIcon,
         children: [
-          { to: '/ai/runs', label: 'History', icon: EventsIcon },
           { to: '/ai/bus', label: 'Bus', icon: LogsIcon },
           { to: '/ai/map', label: 'Map', icon: MapIcon },
           { to: '/ai/config', label: 'Settings', icon: SettingsIcon },
@@ -93,15 +105,7 @@ const NAV_GROUPS: NavGroup[] = [
     label: 'Configuration',
     entries: [
       { to: '/discovery', label: 'Discovery', icon: DiscoveryIcon },
-      {
-        label: 'Integrations',
-        icon: IntegrationsIcon,
-        children: [
-          { to: '/integrations', label: 'Configured', icon: IntegrationsIcon, end: true },
-          { to: '/integrations/credentials', label: 'Credentials', icon: LockIcon },
-          { to: '/integrations/learn', label: 'How it works', icon: InfoIcon },
-        ],
-      },
+      { to: '/integrations', label: 'Credentials & Keys', icon: IntegrationsIcon },
       { to: '/networks', label: 'Networks', icon: NetworksIcon },
       { to: '/system', label: 'Settings', icon: SettingsIcon },
     ],
@@ -115,13 +119,28 @@ const NAV_GROUPS: NavGroup[] = [
   },
 ]
 
+/** With the knowledge base off, only "Settings" stays under the Knowledge parent - the one page
+ * that must always be reachable to turn it back on (see docs/decisions.md). Browse/Map/How it
+ * works would otherwise show a page with nothing useful to do on it. */
+function navGroups(knowledgeBaseOn: boolean): NavGroup[] {
+  if (knowledgeBaseOn) return NAV_GROUPS
+  return NAV_GROUPS.map((group) => ({
+    ...group,
+    entries: group.entries.map((entry) =>
+      isParent(entry) && entry.label === 'Knowledge'
+        ? { ...entry, children: entry.children.filter((c) => c.label === 'Settings') }
+        : entry,
+    ),
+  }))
+}
+
 function linkClasses(isActive: boolean, collapsed: boolean): string {
   return `group relative flex items-center gap-3 rounded-control px-3 py-2 text-sm transition-colors ${
     collapsed ? 'justify-center px-0' : ''
   } ${
     isActive
-      ? 'bg-surface font-medium text-accent-strong shadow-sm'
-      : 'text-fg hover:bg-fg-subtle/10'
+      ? 'bg-accent-soft font-medium text-fg'
+      : 'text-fg-muted hover:bg-fg-subtle/10 hover:text-fg'
   }`
 }
 
@@ -135,14 +154,7 @@ function Leaf({ item, collapsed, nested = false }: { item: NavLeaf; collapsed: b
     >
       {({ isActive }) => (
         <>
-          {isActive && (
-            <span
-              aria-hidden
-              className="absolute left-0 top-1.5 bottom-1.5 w-[3px] rounded-full"
-              style={{ backgroundImage: 'var(--accent-gradient)' }}
-            />
-          )}
-          <item.icon className={`h-5 w-5 shrink-0 ${isActive ? 'text-accent' : 'text-fg-muted group-hover:text-fg'}`} />
+          <item.icon className={`h-[18px] w-[18px] shrink-0 ${isActive ? 'text-fg' : 'text-fg-muted group-hover:text-fg'}`} />
           {!collapsed && <span className="truncate">{item.label}</span>}
           {!collapsed && item.beta && (
             <span className="ml-auto rounded-sm bg-accent-soft-strong px-1.5 py-0.5 text-[10px] font-medium text-accent-strong">BETA</span>
@@ -168,10 +180,10 @@ function Parent({ entry, collapsed }: { entry: NavParent; collapsed: boolean }) 
       <button
         type="button"
         aria-expanded={open}
-        className="flex w-full items-center gap-3 rounded-control px-3 py-2 text-sm text-fg hover:bg-fg-subtle/10"
+        className="flex w-full items-center gap-3 rounded-control px-3 py-2 text-sm text-fg-muted hover:bg-fg-subtle/10 hover:text-fg"
         onClick={() => setOpenByHand(!open)}
       >
-        <entry.icon className="h-5 w-5 shrink-0 text-fg-muted" />
+        <entry.icon className="h-[18px] w-[18px] shrink-0 text-fg-muted" />
         <span className="truncate">{entry.label}</span>
         <span className="ml-auto text-fg-subtle">{open ? <ChevronDownIcon /> : <ChevronRightIcon />}</span>
       </button>
@@ -192,7 +204,7 @@ function ScopeBox({ collapsed }: { collapsed: boolean }) {
   const text = isLoading ? 'Checking platform…' : ok ? 'Platform healthy' : 'Platform unreachable'
   return (
     <div
-      className={`flex items-center gap-2 rounded-control bg-fg-subtle/10 px-3 py-2.5 text-sm ${collapsed ? 'justify-center px-0' : ''}`}
+      className={`flex items-center gap-2 rounded-control border border-line px-3 py-2.5 text-sm text-fg-muted ${collapsed ? 'justify-center px-0' : ''}`}
       title={text}
     >
       <PulseDot ok={ok} />
@@ -213,34 +225,40 @@ export function Sidebar({
   mobileOpen: boolean
   onNavigate: () => void
 }) {
+  const { data: aiSettings } = useAiModeSettings()
+  // Defaults to shown while the setting is still loading (or on any page that doesn't otherwise
+  // need it) - hiding first and revealing a moment later would flicker, and showing by default
+  // never strands anyone (worst case, a page they could already reach stays reachable).
+  const groups = useMemo(() => navGroups(aiSettings?.knowledge_base_enabled ?? true), [aiSettings])
   return (
     <aside
       aria-label="Main navigation"
-      className={`fixed inset-y-0 left-0 top-14 z-40 flex shrink-0 flex-col overflow-y-auto border-r border-line bg-canvas transition-[width,transform] md:sticky md:top-14 md:h-[calc(100vh-3.5rem)] md:translate-x-0 ${
-        collapsed ? 'md:w-16' : 'md:w-56'
+      className={`fixed inset-y-0 left-0 z-40 flex shrink-0 flex-col overflow-y-auto border-r border-line bg-surface transition-[width,transform] md:sticky md:inset-auto md:top-3 md:m-3 md:mr-0 md:h-[calc(100vh-1.5rem)] md:translate-x-0 md:rounded-card md:border ${
+        collapsed ? 'md:w-16' : 'md:w-60'
       } w-60 ${mobileOpen ? 'translate-x-0' : '-translate-x-full'}`}
     >
-      <div className="px-3 pt-3">
+      <div className={`flex items-center px-3 pt-4 ${collapsed ? 'flex-col gap-2' : 'justify-between'}`}>
+        <Link to="/" aria-label="Banana home" className="flex items-center gap-2 px-2">
+          <BananaLogo size={28} />
+          {!collapsed && <span className="text-[15px] font-semibold tracking-tight">Banana</span>}
+        </Link>
         <button
           type="button"
           onClick={onToggleCollapsed}
           aria-label={collapsed ? 'Expand sidebar' : 'Collapse sidebar'}
-          className="hidden h-9 w-9 items-center justify-center rounded-control text-fg-muted hover:bg-fg-subtle/10 hover:text-fg md:flex"
+          className="hidden h-8 w-8 items-center justify-center rounded-control text-fg-muted hover:bg-fg-subtle/10 hover:text-fg md:flex"
         >
-          <SidebarIcon className="h-5 w-5" />
+          <SidebarIcon className="h-[18px] w-[18px]" />
         </button>
-        <div className="mt-2">
-          <ScopeBox collapsed={collapsed} />
-        </div>
       </div>
 
-      <nav onClick={onNavigate} className="mt-3 flex flex-1 flex-col gap-4 px-3 pb-4">
-        {NAV_GROUPS.map((group) => (
+      <nav onClick={onNavigate} className="mt-4 flex flex-1 flex-col gap-4 px-3 pb-3">
+        {groups.map((group) => (
           <div key={group.label}>
             {collapsed ? (
               <div className="mx-2 mb-1.5 border-t border-line" />
             ) : (
-              <div className="px-2 pb-1.5 text-xs font-medium text-fg-subtle">{group.label}</div>
+              <div className="px-3 pb-1.5 text-xs text-fg-subtle">{group.label}</div>
             )}
             <div className="flex flex-col gap-0.5">
               {group.entries.map((entry) =>
@@ -254,6 +272,9 @@ export function Sidebar({
           </div>
         ))}
       </nav>
+      <div className="px-3 pb-3">
+        <ScopeBox collapsed={collapsed} />
+      </div>
     </aside>
   )
 }

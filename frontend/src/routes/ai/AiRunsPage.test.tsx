@@ -1,5 +1,6 @@
 import { QueryClientProvider } from '@tanstack/react-query'
-import { render, screen } from '@testing-library/react'
+import { render, screen, within } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
 import { http, HttpResponse } from 'msw'
 import { MemoryRouter } from 'react-router-dom'
 import { beforeEach, describe, expect, it } from 'vitest'
@@ -23,7 +24,7 @@ const FAILED_RUN: AiRunSummary = {
   started_at: '2026-10-13T20:48:17Z',
   finished_at: '2026-10-13T20:50:25Z',
   status: 'error',
-  targets: ['192.168.1.55'],
+  targets: ['10.0.0.55'],
   dry_run: false,
   model: 'llama3.2:latest',
   prompt_tokens: 72183,
@@ -64,5 +65,41 @@ describe('AiRunsPage', () => {
     expect(await screen.findByText('Discovered 3 services.')).toBeInTheDocument()
     expect(screen.getByText('running')).toBeInTheDocument()
     expect(screen.getAllByText('—').length).toBeGreaterThan(0)
+  })
+})
+
+describe('AiRunsPage filters', () => {
+  beforeEach(() => queryClient.clear())
+  const runs: AiRunSummary[] = [
+    { ...FAILED_RUN, id: 1, model: 'alpha', agents: ['bellaco'], tools: ['run_nmap'], entry_agent: 'bellaco' },
+    { ...FAILED_RUN, id: 2, model: 'beta', status: 'done', error: null, summary: 'ok', agents: ['reporter'], tools: ['run_nc'], entry_agent: 'reporter' },
+  ]
+
+  it('filters from the right-hand panel, shows removable chips, and clears', async () => {
+    server.use(http.get('/api/ai-mode/runs', () => HttpResponse.json(runs)))
+    renderPage()
+    expect(await screen.findByText('#1')).toBeInTheDocument()
+    expect(screen.getByText('#2')).toBeInTheDocument()
+
+    await userEvent.click(within(screen.getByRole('region', { name: 'Tools' })).getByLabelText(/run_nc/))
+    expect(screen.queryByText('#1')).not.toBeInTheDocument()
+    expect(screen.getByText('#2')).toBeInTheDocument()
+
+    await userEvent.click(screen.getByRole('button', { name: 'Remove tool filter run_nc' }))
+    expect(screen.getByText('#1')).toBeInTheDocument()
+  })
+
+  it('applies a filter when a model cell is clicked, and the Errors tab narrows to failures', async () => {
+    server.use(http.get('/api/ai-mode/runs', () => HttpResponse.json(runs)))
+    renderPage()
+    await screen.findByText('#1')
+
+    await userEvent.click(screen.getByTitle('Filter by model beta'))
+    expect(screen.queryByText('#1')).not.toBeInTheDocument()
+
+    await userEvent.click(screen.getByRole('button', { name: 'Clear all' }))
+    await userEvent.click(screen.getByRole('button', { name: /^Errors/ }))
+    expect(screen.getByText('#1')).toBeInTheDocument()
+    expect(screen.queryByText('#2')).not.toBeInTheDocument()
   })
 })

@@ -2,14 +2,13 @@ import { useQueryClient } from '@tanstack/react-query'
 import { useEffect, useRef, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { useLogout, useMe } from '../api/auth'
-import { BananaLogo } from './BananaLogo'
 import { useAiStatus } from '../api/aiMode'
 import { useInternetAccess } from '../api/system'
-import { GlobeIcon, LoopIcon, RefreshIcon } from './icons'
+import { GlobeIcon, LoopIcon, RefreshIcon, SidebarIcon } from './icons'
 import { ThemeToggle } from './ThemeToggle'
 
 const iconButton =
-  'flex h-9 w-9 items-center justify-center rounded-full text-topbar-fg/90 transition-colors hover:bg-black/10 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-current'
+  'flex h-9 w-9 items-center justify-center rounded-full text-fg-muted transition-colors hover:bg-fg-subtle/15 hover:text-fg focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-current'
 
 function UserMenu() {
   const { data: me } = useMe()
@@ -33,7 +32,7 @@ function UserMenu() {
         aria-label="Account menu"
         aria-expanded={open}
         onClick={() => setOpen((v) => !v)}
-        className="flex h-8 w-8 items-center justify-center rounded-full bg-topbar-fg text-sm font-semibold text-[var(--topbar-from)]"
+        className="flex h-8 w-8 items-center justify-center rounded-full border border-line bg-surface text-sm font-medium text-fg"
       >
         {(me?.username ?? '?').slice(0, 1).toUpperCase()}
       </button>
@@ -86,7 +85,7 @@ function InternetIndicator() {
     : `Internet access is on for AI agents: ${names}. Open settings.`
   return (
     <Link
-      to="/system#internet"
+      to="/ai/config#internet"
       aria-label={data.blocked ? 'Agent internet access is blocked' : 'Agent internet access is on'}
       title={title}
       className={`${iconButton} relative`}
@@ -101,33 +100,21 @@ function InternetIndicator() {
   )
 }
 
-/** The full-width brand bar: platform name on the left, the mark in the middle, quick actions on the right. */
+/** The slim top strip: mobile menu button on the left, quick actions on the right. */
 export function TopBar({ onMenu }: { onMenu: () => void }) {
   const queryClient = useQueryClient()
   return (
-    <header
-      className="relative flex h-14 shrink-0 items-center justify-between gap-2 px-3 text-topbar-fg md:px-4"
-      style={{ backgroundImage: 'linear-gradient(90deg, var(--topbar-from), var(--topbar-to))' }}
-    >
+    <header className="flex h-14 shrink-0 items-center justify-between gap-2 border-b border-line bg-surface px-3 md:px-4">
       <div className="flex items-center gap-2">
         <button type="button" aria-label="Open menu" className={`${iconButton} md:hidden`} onClick={onMenu}>
-          <span aria-hidden className="text-lg leading-none">
-            ☰
-          </span>
+          <SidebarIcon className="h-5 w-5" />
         </button>
-        <GlobeIcon className="hidden h-5 w-5 md:block" />
-        <span className="text-sm font-medium">Banana</span>
       </div>
 
-      <Link to="/" className="absolute left-1/2 flex -translate-x-1/2 items-center gap-1.5" aria-label="Banana home">
-        <BananaLogo />
-        <span className="text-[15px] font-semibold tracking-tight">Banana</span>
-        <span className="hidden text-xs text-topbar-fg/80 lg:inline">
-          Built-in Alerting for Networks, Appliances, Nodes and Apps
-        </span>
-      </Link>
-
       <div className="flex items-center gap-1">
+        <span className="mr-2 hidden text-xs text-fg-muted xl:inline">
+          <span className="font-semibold text-fg">Banana</span> - Built-in Alerting for Networks, Appliances, Nodes and Apps
+        </span>
         <InternetIndicator />
         <LoopIndicator />
         <button
@@ -139,7 +126,7 @@ export function TopBar({ onMenu }: { onMenu: () => void }) {
         >
           <RefreshIcon className="h-5 w-5" />
         </button>
-        <ThemeToggle className={iconButton} />
+        <ThemeToggle className="flex h-9 w-9 items-center justify-center rounded-control bg-accent text-on-accent transition-opacity hover:opacity-85" />
         <UserMenu />
       </div>
     </header>

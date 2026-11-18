@@ -1,5 +1,6 @@
 import { useMemo, useState } from 'react'
 import { type CatalogModel, type Cost, useCost, useOpenRouterCatalog, useResetCost } from '../../api/aiCost'
+import { useAiModeSettings } from '../../api/aiMode'
 import { Card, StatTile } from '../../components/Card'
 
 const n = (value: number) => value.toLocaleString()
@@ -130,6 +131,7 @@ function Chooser({ cost }: { cost: Cost }) {
 
 export function CostPanel() {
   const { data: cost, isPending, error } = useCost()
+  const { data: aiSettings } = useAiModeSettings()
   const reset = useResetCost()
   const catalog = useOpenRouterCatalog(false)
   if (isPending) return <p className="mt-6 text-sm text-fg-muted">Loading...</p>
@@ -138,6 +140,8 @@ export function CostPanel() {
   const { totals } = cost
   const prices = new Map((catalog.data ?? []).map((m) => [m.id, m]))
   const perDay = totals.total_tokens / daysCounted(cost)
+  const budget = aiSettings?.cost_budget_usd
+  const overBudget = budget != null && budget > 0 && cost.actual_usd > budget
 
   return (
     <div className="mt-6 flex flex-col gap-6">
@@ -162,7 +166,15 @@ export function CostPanel() {
         </button>
       </div>
 
-      <div className="grid grid-cols-2 gap-4 md:grid-cols-5">
+      {overBudget && (
+        <p className="rounded-control border border-red-300 bg-red-50 px-3 py-2 text-sm text-red-800 dark:border-red-900/50 dark:bg-red-950/30 dark:text-red-300">
+          Actual spend ({usd(cost.actual_usd)}) is over the {usd(budget)} budget set under Settings &gt; General.
+          This is a notice only - no agent run was stopped.
+        </p>
+      )}
+
+      <div className="grid grid-cols-2 gap-4 md:grid-cols-6">
+        <StatTile label="Actual spend" value={usd(cost.actual_usd)} />
         <StatTile label="Total tokens" value={n(totals.total_tokens)} />
         <StatTile label="Tokens in" value={n(totals.prompt_tokens)} />
         <StatTile label="Tokens out" value={n(totals.completion_tokens)} />

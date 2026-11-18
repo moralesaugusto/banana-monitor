@@ -1,6 +1,6 @@
 """Local self-signed TLS certificate for HTTPS, on by default (see
-`Settings.https_enabled` in `app.config`). This is a trusted-LAN-only app
-(see AGENTS.md): the point of a self-signed cert here is transport
+`Settings.https_enabled` in `app.config`). This is a trusted-LAN-only app:
+the point of a self-signed cert here is transport
 encryption without standing up a CA, not identity verification - browsers
 will show a one-time warning to accept it.
 

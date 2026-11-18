@@ -26,8 +26,21 @@ class AiModeSettingsRead(BaseModel):
     enabled_tools: list[str]
     allow_undefined_network_scan: bool = False
     undefined_scan_max_hosts: int
+    allow_public_targets: bool = False
+    cred_allow_unlisted_hosts: bool = False
+    cred_no_attempt_limit: bool = False
+    cred_trust_new_host_keys: bool = False
+    cred_pool_for_updates: bool = False
     ollama_max_concurrent_calls: int
     openrouter_max_concurrent_calls: int
+    memory_max_entries_per_agent: int
+    memory_max_content_chars: int
+    memory_max_inject_chars: int
+    knowledge_base_enabled: bool = False
+    knowledge_embedding_base_url: str
+    knowledge_embedding_model: str
+    knowledge_embedding_credential_id: int | None = None
+    cost_budget_usd: float | None = None
 
 
 class AiModeSettingsUpdate(BaseModel):
@@ -45,8 +58,26 @@ class AiModeSettingsUpdate(BaseModel):
     enabled_tools: list[str] | None = None
     allow_undefined_network_scan: bool | None = None
     undefined_scan_max_hosts: int | None = Field(default=None, ge=1, le=1024)
+    allow_public_targets: bool | None = None
+    cred_allow_unlisted_hosts: bool | None = None
+    cred_no_attempt_limit: bool | None = None
+    cred_trust_new_host_keys: bool | None = None
+    cred_pool_for_updates: bool | None = None
     ollama_max_concurrent_calls: int | None = Field(default=None, ge=1, le=16)
     openrouter_max_concurrent_calls: int | None = Field(default=None, ge=1, le=16)
+    memory_max_entries_per_agent: int | None = Field(default=None, ge=1, le=500)
+    memory_max_content_chars: int | None = Field(default=None, ge=20, le=4000)
+    memory_max_inject_chars: int | None = Field(default=None, ge=100, le=20000)
+    knowledge_base_enabled: bool | None = None
+    knowledge_embedding_base_url: str | None = Field(default=None, max_length=300)
+    knowledge_embedding_model: str | None = Field(default=None, min_length=1, max_length=200)
+    knowledge_embedding_credential_id: int | None = None
+    cost_budget_usd: float | None = Field(default=None, ge=0)
+
+
+class ToolAgent(BaseModel):
+    id: int
+    name: str
 
 
 class ToolInfo(BaseModel):
@@ -54,6 +85,55 @@ class ToolInfo(BaseModel):
     description: str
     parameters: dict[str, Any]
     enabled: bool
+    runs_on: str
+    runs_on_label: str
+    where: str
+    safeguards: list[str]
+    agents: list[ToolAgent]
+    """Enabled agents that hold this tool."""
+
+
+class ToolUsage(BaseModel):
+    name: str
+    calls: int
+    errors: int
+    """Calls whose result was an error: refused by a safeguard, or failed."""
+    last_used: datetime.datetime
+    last_run_id: int
+    worked_request: Any = None
+    worked_response: Any = None
+    worked_run_id: int | None = None
+    stopped_request: Any = None
+    stopped_reason: str | None = None
+    stopped_run_id: int | None = None
+
+
+class ToolAvailability(BaseModel):
+    name: str
+    kind: Literal["builtin", "command", "mcp"]
+    status: Literal["ok", "missing", "unreachable", "blocked"]
+    detail: str
+
+
+class PipelineStage(BaseModel):
+    id: str
+    title: str
+    status: Literal["pass", "stop", "skip", "note"]
+    """pass: it went through. stop: the call ends here. skip: does not apply, or not reached. note: it
+    would go on, but a human would be involved."""
+    detail: str
+
+
+class ToolTrace(BaseModel):
+    stages: list[PipelineStage]
+    would_run: bool
+    command: str | None = None
+    """The exact command line, for tools that run a program."""
+
+
+class TryCallRequest(BaseModel):
+    arguments: dict[str, Any] = {}
+    agent_id: int | None = None
 
 
 class AiModeTools(BaseModel):
@@ -87,6 +167,8 @@ class AiRunSummary(BaseModel):
     started_by: str = "manual"
     stop_reason: str | None = None
     entry_agent: str = ""
+    agents: list[str] = []
+    tools: list[str] = []
 
     id: int
     started_at: datetime.datetime
@@ -150,6 +232,19 @@ class CustomToolRead(CustomToolBase):
     model_config = ConfigDict(from_attributes=True)
 
     id: int
+    mcp_server_id: int | None = None
+
+
+class ToolTestResult(BaseModel):
+    id: int
+    name: str
+    ok: bool
+    """True only if the tool was actually called and it answered without error - not merely reachable."""
+    detail: str
+    duration_ms: int
+    arguments_used: dict[str, Any]
+    """What was actually sent - a required field with no safe generic value (not a target) is sent
+    empty/zero, so a failure caused by that is visible rather than silently skipped."""
 
 
 class GuardrailBase(BaseModel):
@@ -158,6 +253,7 @@ class GuardrailBase(BaseModel):
     kind: Literal["deny_regex", "allow_regex"]
     pattern: str = Field(min_length=1, max_length=500)
     enabled: bool = True
+    applies_to: Literal["default", "all"] = "default"
 
     @field_validator("pattern")
     @classmethod
@@ -173,6 +269,14 @@ class GuardrailRead(GuardrailBase):
     model_config = ConfigDict(from_attributes=True)
 
     id: int
+
+
+class MemoryEntryRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    content: str
+    created_at: datetime.datetime
 
 
 class AgentBase(BaseModel):
@@ -196,11 +300,24 @@ class AgentBase(BaseModel):
     """Replaces every MCP custom tool's own mcp_url for this agent's calls only."""
     mcp_timeout_seconds: float = Field(default=0, ge=0, le=600)
     """0 uses custom_tools.MCP_TIMEOUT_SECONDS (30s)."""
+    memory_max_entries_override: int = Field(default=0, ge=0, le=500)
+    """0 uses the default (AiModeSettings.memory_max_entries_per_agent)."""
+    memory_max_content_chars_override: int = Field(default=0, ge=0, le=4000)
+    """0 uses the default (AiModeSettings.memory_max_content_chars)."""
+    memory_max_inject_chars_override: int = Field(default=0, ge=0, le=20000)
+    """0 uses the default (AiModeSettings.memory_max_inject_chars)."""
+    fallback_provider: Literal["", "ollama", "openrouter"] = ""
+    """Empty = no fallback configured. If set, a failed primary model call is retried once here."""
+    fallback_base_url: str = Field(default="", max_length=300, pattern=r"^(https?://\S+)?$")
+    fallback_model: str = Field(default="", max_length=200)
+    fallback_credential_id: int | None = None
     subscribes: list[str] = []
     publishes: list[str] = []
     require_approval: Literal["none", "messages", "tools", "both"] = "none"
     enabled: bool = True
     allow_changes: bool = False
+    credential_scope: Literal["bound", "pool", "selected"] = "bound"
+    credential_scope_ids: list[int] = []
     workflow_x: float | None = None
     workflow_y: float | None = None
 
@@ -213,6 +330,21 @@ class AgentBase(BaseModel):
         return patterns
 
 
+class AgentConnectionTest(BaseModel):
+    """Values to test, usually the unsaved form - same idea as the chat assistant's `ConnectionTest`
+    (assistant.py) but resolved against the agents' default LLM (AiModeSettings), not the chat
+    assistant's own config. Anything left out falls back the same way Verify resolves it
+    (`effective_endpoint`)."""
+
+    provider: str = ""
+    base_url: str = ""
+    model: str = ""
+    credential_id: int | None = None
+    api_key: str | None = None
+    """Typed key for this test only, overrides credential_id; never stored."""
+    timeout_seconds: float | None = Field(default=None, ge=10, le=1800)
+
+
 class WorkflowUpdate(BaseModel):
     enabled: bool | None = None
     workflow_x: float | None = None
@@ -223,6 +355,9 @@ class AgentRead(AgentBase):
     model_config = ConfigDict(from_attributes=True)
 
     id: int
+    memory_count: int = 0
+    """How many `remember` notes this agent has saved - set by the route, not a real column, so
+    the Agents list can show it as a badge without a separate request per agent."""
 
 
 class VerifyCheck(BaseModel):
@@ -405,3 +540,47 @@ class BusHealth(BaseModel):
     agents: list[BusAgentHealth]
     held: list[BusHeldMessage]
     problems: list[BusProblem]
+
+
+class McpServerBase(BaseModel):
+    name: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9 _.-]{0,39}$")
+    url: str = Field(pattern=r"^https?://\S+$")
+
+
+class McpServerRead(McpServerBase):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    tool_count: int = 0
+
+
+class McpTestRequest(BaseModel):
+    url: str = Field(pattern=r"^https?://\S+$")
+
+
+class McpTestResult(BaseModel):
+    ok: bool
+    detail: str
+    server_name: str = ""
+    server_version: str = ""
+    tool_count: int = 0
+    tool_names: list[str] = []
+    """The first few, enough to recognize the server."""
+    duration_ms: int = 0
+
+
+class McpImportRequest(BaseModel):
+    remove_missing: bool = False
+    """Also delete tools of this server that it no longer offers."""
+
+
+class McpImportResult(BaseModel):
+    added: int
+    updated: int
+    removed: int
+    unscoped: list[str]
+    """Imported tools with no target/ip/host argument: the network-scope check cannot cover them."""
+
+
+class McpDeleteResult(BaseModel):
+    tools_removed: int

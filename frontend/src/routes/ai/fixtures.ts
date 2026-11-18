@@ -41,6 +41,7 @@ export const TOOLS = [
   { name: 'apply_updates', description: 'Install pending package updates. A human approves.', parameters: {}, enabled: false },
   { name: 'web_search', description: 'Search the internet.', parameters: {}, enabled: false },
   { name: 'publish_message', description: 'Publish a message to a topic.', parameters: {}, enabled: false },
+  { name: 'remember', description: 'Save a short note for your own future runs.', parameters: {}, enabled: false },
 ]
 
 /** An in-memory agents API: GET/POST/PUT/DELETE behave like the real one, so saves show up in the list. */

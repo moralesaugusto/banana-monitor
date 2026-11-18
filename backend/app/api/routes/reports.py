@@ -19,6 +19,8 @@ class ReportSummary(BaseModel):
     id: int
     title: str
     source: str
+    run_id: int | None = None
+    scope: str | None = None
     created_at: datetime.datetime
 
     model_config = {"from_attributes": True}
@@ -66,6 +68,16 @@ async def generate_ai_report(session: AppSession) -> dict[str, int]:
 @router.get("/{report_id}", response_model=ReportRead)
 async def get_report(report_id: int, session: AppSession) -> Report:
     return await _report_or_404(session, report_id)
+
+
+@router.get("/{report_id}/markdown")
+async def get_report_markdown(report_id: int, session: AppSession) -> Response:
+    report = await _report_or_404(session, report_id)
+    return Response(
+        f"# {report.title}\n\n{report.content}",
+        media_type="text/markdown; charset=utf-8",
+        headers={"Content-Disposition": f'attachment; filename="report-{report.id}.md"'},
+    )
 
 
 @router.get("/{report_id}/pdf")

@@ -27,6 +27,12 @@ async def get_metrics_session() -> AsyncIterator[AsyncSession]:
         yield session
 
 
+async def get_knowledge_session() -> AsyncIterator[AsyncSession]:
+    databases = get_databases()
+    async with databases.knowledge_session_factory() as session:
+        yield session
+
+
 def get_credential_service() -> CredentialService:
     return CredentialService(get_secret_box())
 
@@ -34,6 +40,7 @@ def get_credential_service() -> CredentialService:
 AppSession = Annotated[AsyncSession, Depends(get_app_session)]
 CredentialsSession = Annotated[AsyncSession, Depends(get_credentials_session)]
 MetricsSession = Annotated[AsyncSession, Depends(get_metrics_session)]
+KnowledgeSession = Annotated[AsyncSession, Depends(get_knowledge_session)]
 CredentialServiceDep = Annotated[CredentialService, Depends(get_credential_service)]
 
 

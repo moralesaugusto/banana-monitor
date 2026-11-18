@@ -20,6 +20,22 @@ class AssistantConfigRead(BaseModel):
     writes. Enforced server-side either way - see AssistantConfig.full_access."""
 
 
+class AssistantToolInfo(BaseModel):
+    name: str
+    description: str
+    parameters: dict[str, Any]
+    write: bool
+    """A safe-write tool, gated by AssistantConfig.full_access - see WRITE_TOOL_NAMES
+    (llm/tools.py). False: always available, read-only."""
+    enabled: bool
+    """Whether this tool is actually usable right now: always true for a read-only tool, true for
+    a write tool only when full_access is on."""
+
+
+class AssistantTools(BaseModel):
+    tools: list[AssistantToolInfo]
+
+
 class AssistantConfigUpdate(BaseModel):
     provider: AssistantProvider | None = None
     base_url: str | None = None

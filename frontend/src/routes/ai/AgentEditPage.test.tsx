@@ -69,6 +69,7 @@ describe('AgentEditPage', () => {
     renderAt('/ai/agents/new')
 
     await user.type(await screen.findByPlaceholderText('reviewer'), 'summarizer')
+    await user.click(screen.getByRole('radio', { name: 'Custom' }))
     await user.type(screen.getByPlaceholderText('http://localhost:11434/v1'), 'http://gpu:11434/v1')
     await user.click(screen.getByRole('button', { name: 'Load models' }))
     expect(await screen.findByText('1 model(s) on http://gpu:11434/v1')).toBeInTheDocument()
@@ -92,7 +93,8 @@ describe('AgentEditPage', () => {
     const user = userEvent.setup()
     renderAt('/ai/agents/reviewer/edit')
 
-    await user.selectOptions(await screen.findByLabelText(/^Provider/), 'openrouter')
+    await user.click(await screen.findByRole('radio', { name: 'Custom' }))
+    await user.selectOptions(screen.getByLabelText(/^Provider/), 'openrouter')
     await user.type(screen.getByPlaceholderText('sk-or-...'), 'sk-or-secret')
     await user.type(screen.getByLabelText(/^Model \(empty/), 'x/y:free')
     await user.click(screen.getByRole('button', { name: 'Save' }))
@@ -102,6 +104,41 @@ describe('AgentEditPage', () => {
     )
     expect(credential).toMatchObject({ secret: { token: 'sk-or-secret' } })
     expect(JSON.stringify(api.agents[0])).not.toContain('sk-or-secret')
+  })
+
+  it('lets you pick an already-stored OpenRouter key instead of pasting a new one', async () => {
+    const api = agentsApi([agent(1, 'tajonaso')])
+    let posted: unknown = null
+    server.use(
+      http.get('/api/credentials', () =>
+        HttpResponse.json([
+          {
+            id: 9,
+            label: 'OpenRouter API key (agents)',
+            credential_type: 'api_token',
+            created_at: '',
+            rotated_at: null,
+            last_used_at: null,
+            used_by: [],
+          },
+        ]),
+      ),
+      http.post('/api/credentials', async ({ request }) => {
+        posted = await request.json()
+        return HttpResponse.json({ id: 99 })
+      }),
+    )
+    const user = userEvent.setup()
+    renderAt('/ai/agents/tajonaso/edit')
+
+    await user.click(await screen.findByRole('radio', { name: 'Custom' }))
+    await user.selectOptions(screen.getByLabelText(/^Provider/), 'openrouter')
+    await user.selectOptions(await screen.findByLabelText('Stored OpenRouter key'), '9')
+    await user.type(screen.getByLabelText(/^Model \(empty/), 'x/y:free')
+    await user.click(screen.getByRole('button', { name: 'Save' }))
+
+    await waitFor(() => expect(api.agents[0]).toMatchObject({ credential_id: 9 }))
+    expect(posted).toBeNull() // reused the stored credential - never minted a new one
   })
 
   it('sets a display name shown in the UI instead of the raw name, independent of Enabled', async () => {
@@ -135,8 +172,89 @@ describe('AgentEditPage', () => {
     expect(screen.getByText('changes hosts')).toBeInTheDocument()
   })
 
-  it('shows previous performance for a typed model, or that none is recorded yet', async () => {
+  it('passes the picked provider to Load models, not just the base URL', async () => {
     agentsApi([agent(1, 'bellaco')])
+    let seenProvider: string | null = null
+    server.use(
+      http.get('/api/ai-mode/ollama-models', ({ request }) => {
+        seenProvider = new URL(request.url).searchParams.get('provider')
+        return HttpResponse.json({ base_url: 'https://openrouter.ai/api/v1', models: ['anthropic/claude-3.5-sonnet'] })
+      }),
+    )
+    const user = userEvent.setup()
+    renderAt('/ai/agents/bellaco/edit')
+
+    await user.click(await screen.findByRole('radio', { name: 'Custom' }))
+    await user.selectOptions(screen.getByLabelText('Provider'), 'openrouter')
+    await user.click(screen.getByRole('button', { name: 'Load models' }))
+
+    await screen.findByText('1 model(s) on https://openrouter.ai/api/v1')
+    expect(seenProvider).toBe('openrouter')
+  })
+
+  it('shows an OpenRouter-looking placeholder for the base URL once that provider is picked', async () => {
+    const user = userEvent.setup()
+    agentsApi([agent(1, 'bellaco')])
+    renderAt('/ai/agents/bellaco/edit')
+
+    await user.click(await screen.findByRole('radio', { name: 'Custom' }))
+    expect(screen.getByPlaceholderText('http://localhost:11434/v1')).toBeInTheDocument()
+    await user.selectOptions(screen.getByLabelText('Provider'), 'openrouter')
+    expect(screen.getByPlaceholderText('https://openrouter.ai/api/v1')).toBeInTheDocument()
+  })
+
+  it('tests the connection with this agent\'s own settings, same as the General/Assistant tabs', async () => {
+    agentsApi([agent(1, 'bellaco', { provider: 'openrouter', model_override: 'anthropic/claude-3.5-sonnet' })])
+    let sent: Record<string, unknown> | null = null
+    server.use(
+      http.post('/api/ai-mode/agents/test-connection', async ({ request }) => {
+        sent = (await request.json()) as Record<string, unknown>
+        return HttpResponse.json({
+          ok: true,
+          checks: [{ id: 'host', status: 'ok', title: 'Host answers', detail: '' }],
+        })
+      }),
+    )
+    const user = userEvent.setup()
+    renderAt('/ai/agents/bellaco/edit')
+
+    await user.click(await screen.findByRole('button', { name: 'Test connection' }))
+    expect(await screen.findByText('Host answers')).toBeInTheDocument()
+    expect(sent).toMatchObject({ provider: 'openrouter', model: 'anthropic/claude-3.5-sonnet' })
+  })
+
+  it('blocks saving OpenRouter with no key configured anywhere, client-side', async () => {
+    const api = agentsApi([agent(1, 'bellaco')])
+    const user = userEvent.setup()
+    renderAt('/ai/agents/bellaco/edit')
+
+    await user.click(await screen.findByRole('radio', { name: 'Custom' }))
+    await user.selectOptions(screen.getByLabelText('Provider'), 'openrouter')
+    await user.click(screen.getByRole('button', { name: 'Save' }))
+
+    expect(await screen.findByText(/Enter an OpenRouter API key for this agent/)).toBeInTheDocument()
+    expect(api.calls).toEqual([]) // never reached the network
+  })
+
+  it('puts the Remember checkbox and its overrides in Model, not Tools', async () => {
+    const api = agentsApi([agent(1, 'bellaco', { enabled_tools: ['remember'] })])
+    const user = userEvent.setup()
+    renderAt('/ai/agents/bellaco/edit')
+
+    expect(await screen.findByRole('heading', { name: 'Edit bellaco' })).toBeInTheDocument()
+    const remember = screen.getByRole('checkbox', { name: /^Remember/ })
+    expect(remember).toBeChecked()
+    expect(screen.queryByRole('checkbox', { name: /^remember/ })).not.toBeInTheDocument() // not in Tools too
+    expect(screen.getByLabelText(/Max notes kept/)).toBeInTheDocument() // overrides shown while ticked
+
+    await user.click(remember)
+    expect(screen.queryByLabelText(/Max notes kept/)).not.toBeInTheDocument() // hidden once unticked
+    await user.click(screen.getByRole('button', { name: 'Save' }))
+    await waitFor(() => expect(api.agents[0].enabled_tools).not.toContain('remember'))
+  })
+
+  it('shows previous performance for the agent\'s saved model, not a live keystroke-by-keystroke draft', async () => {
+    agentsApi([agent(1, 'bellaco', { provider: 'ollama', model_override: 'qwen3:8b' })])
     server.use(
       http.get('/api/ai-mode/performance', () =>
         HttpResponse.json({
@@ -156,14 +274,17 @@ describe('AgentEditPage', () => {
     const user = userEvent.setup()
     renderAt('/ai/agents/bellaco/edit')
 
-    const model = await screen.findByLabelText(/^Model \(empty/)
-    await user.type(model, 'qwen3:8b')
+    await user.click(await screen.findByRole('radio', { name: 'Custom' }))
+    // Shown for the agent's saved model straight away, with nothing typed yet.
     expect(await screen.findByText(/Used before \(by sinverguenza, reporter\)/)).toBeInTheDocument()
     expect(screen.getByText(/4\.2s per call, 12\.5 tok\/s over 5 call\(s\)/)).toBeInTheDocument()
 
+    // Typing a different, not-yet-saved model must not flicker the hint per keystroke - it stays
+    // keyed to the saved model until the agent is actually saved again.
+    const model = screen.getByLabelText(/^Model \(empty/)
     await user.clear(model)
     await user.type(model, 'brand-new-model')
-    expect(await screen.findByText('No performance history yet for this model.')).toBeInTheDocument()
+    expect(screen.getByText(/Used before \(by sinverguenza, reporter\)/)).toBeInTheDocument()
   })
 
   it('Verify checks the unsaved draft without saving it', async () => {
@@ -288,3 +409,125 @@ describe('AgentEditPage', () => {
     expect(screen.getByRole('link', { name: 'Back to the agents' })).toBeInTheDocument()
   })
 })
+
+describe('AgentEditPage connection mode', () => {
+  beforeEach(() => queryClient.clear())
+  afterEach(() => vi.restoreAllMocks())
+
+  it('picks the Ollama or OpenRouter radio for a legacy blank-provider agent once the default loads', async () => {
+    agentsApi([agent(1, 'bellaco')]) // provider: '' - the pre-existing "follows the default" shape
+    renderAt('/ai/agents/bellaco/edit')
+    await screen.findByRole('heading', { name: 'Edit bellaco' })
+
+    await waitFor(() => expect(screen.getByRole('radio', { name: 'Use existing Ollama setting' })).toBeChecked())
+    expect(screen.getByRole('radio', { name: 'Custom' })).not.toBeChecked()
+  })
+
+  it('stays on Custom even once every field in it is cleared back to blank', async () => {
+    const user = userEvent.setup()
+    agentsApi([agent(1, 'bellaco')])
+    renderAt('/ai/agents/bellaco/edit')
+
+    await user.click(await screen.findByRole('radio', { name: 'Custom' }))
+    expect(screen.getByRole('radio', { name: 'Custom' })).toBeChecked()
+    expect(screen.getByLabelText('Provider')).toHaveValue('ollama') // defaulted in, nothing else typed
+
+    // Custom + Ollama + nothing else filled in is, by value, identical to "ollama_default" - the radio
+    // selection must not silently flip back just because of that.
+    expect(screen.getByRole('radio', { name: 'Custom' })).toBeChecked()
+    expect(screen.getByLabelText(/^Model \(empty/)).toBeInTheDocument()
+  })
+
+  it('switching to "Use existing OpenRouter credentials" hides the host/key fields but keeps Model editable', async () => {
+    const user = userEvent.setup()
+    agentsApi([agent(1, 'bellaco', { provider: 'ollama', base_url: 'http://gpu:11434/v1', model_override: 'llama3' })])
+    renderAt('/ai/agents/bellaco/edit')
+
+    await user.click(await screen.findByRole('radio', { name: 'Use existing OpenRouter credentials' }))
+
+    expect(screen.queryByLabelText('Provider')).not.toBeInTheDocument()
+    expect(screen.queryByPlaceholderText('http://gpu:11434/v1')).not.toBeInTheDocument()
+    expect(screen.getByLabelText(/^Model(?!\scall)/)).toHaveValue('llama3') // kept, not cleared by the switch
+  })
+
+  it('links to Settings to assign the agents\' default OpenRouter key when none is set', async () => {
+    const user = userEvent.setup()
+    agentsApi([agent(1, 'bellaco')])
+    renderAt('/ai/agents/bellaco/edit')
+
+    await user.click(await screen.findByRole('radio', { name: 'Use existing OpenRouter credentials' }))
+
+    expect(await screen.findByText(/OpenRouter - no key configured/)).toBeInTheDocument()
+    expect(screen.getByRole('link', { name: /Settings/ })).toHaveAttribute('href', '/ai/config')
+  })
+
+  it('hides every field but Test connection under "Use existing Ollama setting"', async () => {
+    const user = userEvent.setup()
+    agentsApi([agent(1, 'bellaco', { provider: 'openrouter', model_override: 'x/y', base_url: 'https://x' })])
+    renderAt('/ai/agents/bellaco/edit')
+
+    await user.click(await screen.findByRole('radio', { name: 'Use existing Ollama setting' }))
+
+    expect(screen.queryByLabelText('Provider')).not.toBeInTheDocument()
+    expect(screen.queryByLabelText(/^Model(?!\scall)/)).not.toBeInTheDocument()
+    expect(screen.queryByPlaceholderText('sk-or-...')).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Test connection' })).toBeInTheDocument()
+  })
+
+  it('saves an optional fallback model, retried once if the primary call fails', async () => {
+    const api = agentsApi([agent(1, 'bellaco')])
+    const user = userEvent.setup()
+    renderAt('/ai/agents/bellaco/edit')
+
+    expect(screen.queryByLabelText('Fallback model')).not.toBeInTheDocument() // off by default
+
+    await user.click(await screen.findByRole('checkbox', { name: /Fallback model/ }))
+    await user.selectOptions(screen.getByLabelText('Fallback provider'), 'ollama')
+    await user.type(screen.getByLabelText('Fallback model'), 'llama3:70b')
+    await user.click(screen.getByRole('button', { name: 'Save' }))
+
+    await waitFor(() => expect(api.agents[0].fallback_provider).toBe('ollama'))
+    expect(api.agents[0].fallback_model).toBe('llama3:70b')
+  })
+
+  it('unticking the fallback checkbox clears it back to unconfigured', async () => {
+    const api = agentsApi([
+      agent(1, 'bellaco', { fallback_provider: 'ollama', fallback_model: 'llama3:70b' }),
+    ])
+    const user = userEvent.setup()
+    renderAt('/ai/agents/bellaco/edit')
+
+    const toggle = await screen.findByRole('checkbox', { name: /Fallback model/ })
+    expect(toggle).toBeChecked()
+    expect(screen.getByLabelText('Fallback model')).toHaveValue('llama3:70b')
+
+    await user.click(toggle)
+    expect(screen.queryByLabelText('Fallback model')).not.toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: 'Save' }))
+
+    await waitFor(() => expect(api.agents[0].fallback_provider).toBe(''))
+    expect(api.agents[0].fallback_model).toBe('')
+  })
+
+  it('lets an agent use the credential pool or only selected credentials', async () => {
+    server.use(
+      http.get('/api/credentials', () =>
+        HttpResponse.json([
+          { id: 4, label: 'lab-ssh', credential_type: 'ssh_password', created_at: '2026-01-01T00:00:00Z', rotated_at: null, last_used_at: null, in_agent_pool: false, used_by: [] },
+          { id: 5, label: 'nas-ssh', credential_type: 'ssh_key', created_at: '2026-01-01T00:00:00Z', rotated_at: null, last_used_at: null, in_agent_pool: true, used_by: [] },
+        ]),
+      ),
+    )
+    const api = agentsApi([agent(1, 'bellaco', { enabled_tools: ['ssh_readonly'] })])
+    const user = userEvent.setup()
+    renderAt('/ai/agents/bellaco/edit')
+
+    expect(await screen.findByLabelText(/Host-bound integrations only/)).toBeChecked()
+    await user.click(screen.getByLabelText(/Also try only the credentials I select/))
+    await user.click(await screen.findByLabelText(/nas-ssh/))
+    await user.click(screen.getByRole('button', { name: 'Save' }))
+
+    await waitFor(() => expect(api.agents[0]).toMatchObject({ credential_scope: 'selected', credential_scope_ids: [5] }))
+  })
+})
+

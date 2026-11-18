@@ -28,7 +28,7 @@ async def get_latest_metric_values(
         latest_ts_subq,
         (MetricSample.entity_id == latest_ts_subq.c.entity_id)
         & (MetricSample.ts == latest_ts_subq.c.max_ts),
-    )
+    ).where(MetricSample.entity_type == entity_type, MetricSample.metric_name == metric_name)
     result = await session.execute(stmt)
     return {entity_id: value for entity_id, value in result.all()}
 
@@ -47,7 +47,7 @@ async def get_latest_metric_values_for_entity(
         latest_ts_subq,
         (MetricSample.metric_name == latest_ts_subq.c.metric_name)
         & (MetricSample.ts == latest_ts_subq.c.max_ts),
-    )
+    ).where(MetricSample.entity_type == entity_type, MetricSample.entity_id == entity_id)
     result = await session.execute(stmt)
     return {name: value for name, value in result.all()}
 

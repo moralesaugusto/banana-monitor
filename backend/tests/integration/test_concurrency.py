@@ -13,6 +13,7 @@ from app.alerting.engine import get_alert_engine
 from app.db.session import get_databases
 from app.discovery import network_scanner, reachability
 from app.discovery.service import DiscoveredServiceStore, DiscoveryService
+from app.domain.bootstrap import ensure_default_site
 from app.domain.enums import AlertConditionType, DeviceType, EntityType
 from app.domain.models import (
     AiRun,
@@ -452,6 +453,7 @@ async def test_reachability_leaves_integration_polled_devices_alone(
 ) -> None:
     databases = get_databases()
     async with databases.app_session_factory() as session:
+        await ensure_default_site(session)
         plain = Device(site_id=1, display_name="plain", primary_ip="10.0.1.1", device_type=DeviceType.OTHER)
         targeted = Device(
             site_id=1, display_name="targeted", primary_ip="10.0.1.2", device_type=DeviceType.OTHER

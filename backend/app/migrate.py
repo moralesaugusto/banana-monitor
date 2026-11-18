@@ -7,7 +7,7 @@ from alembic import command
 from alembic.config import Config
 
 BACKEND_DIR = Path(__file__).resolve().parents[1]
-DATABASES = ("app", "metrics", "credentials")
+DATABASES = ("app", "metrics", "credentials", "knowledge")
 
 
 def upgrade_all() -> None:

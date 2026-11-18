@@ -17,7 +17,8 @@ from app.domain.bootstrap import (
     ensure_default_agents,
     ensure_default_ai_mode_settings,
 )
-from app.domain.models import AiAgent, AiMessage, AiRunStep
+from app.domain.enums import DeviceType
+from app.domain.models import AiAgent, AiMessage, AiRunStep, Device, Network, Report, Site
 from app.domain.models import Base as AppBase
 from app.llm.agent import create_run
 from app.llm.orchestrator import run_agent
@@ -237,8 +238,11 @@ async def _pre_maestro_merge_install(databases) -> None:
             .where(AiAgent.name == "reporter")
             .values(
                 subscribes=[
-                    "task.reporter", "human.reporter", "result.reviewer",
-                    *(f"result.{n}" for n in NEW), "result.maestro",
+                    "task.reporter",
+                    "human.reporter",
+                    "result.reviewer",
+                    *(f"result.{n}" for n in NEW),
+                    "result.maestro",
                 ],
                 system_prompt=LEGACY_REPORTER_PROMPT_WITH_MAESTRO,
             )
@@ -324,7 +328,10 @@ async def test_reviewer_nmap_handoff_is_backfilled_once(databases):
     agents = await _agents(databases)
 
     assert set(agents["reviewer"].enabled_tools) == {
-        "run_nc", "publish_message", "run_nmap", "record_service",
+        "run_nc",
+        "publish_message",
+        "run_nmap",
+        "record_service",
     }
     assert agents["reviewer"].subscribes == ["discovery.ports.found", "human.reviewer"]
     assert agents["reviewer"].system_prompt == REVIEWER_PROMPT
@@ -368,7 +375,11 @@ async def test_discoverer_gets_report_open_ports_only_if_still_on_the_old_stock_
         await session.commit()
         await ensure_default_agents(session)
     assert (await _agents(databases))["discoverer"].enabled_tools == [
-        "run_nmap", "run_nc", "record_service", "discover_hosts", "report_open_ports",
+        "run_nmap",
+        "run_nc",
+        "record_service",
+        "discover_hosts",
+        "report_open_ports",
     ]
 
     # a customized list (anything not an exact match of the old stock default) is left alone.
@@ -442,7 +453,10 @@ async def test_cross_agent_subscriptions_are_backfilled_once(databases):
             .where(AiAgent.name == "reporter")
             .values(
                 subscribes=[
-                    "task.reporter", "human.reporter", "result.reviewer", *(f"result.{n}" for n in NEW),
+                    "task.reporter",
+                    "human.reporter",
+                    "result.reviewer",
+                    *(f"result.{n}" for n in NEW),
                 ]
             )
         )
@@ -498,7 +512,7 @@ async def test_reviewer_escalates_a_bad_finding_to_sinverguenza(databases, monke
                                         "arguments": json.dumps(
                                             {
                                                 "topic": "task.sinverguenza",
-                                                "content": "192.168.1.12:443 claims https but the banner "
+                                                "content": "10.0.0.12:443 claims https but the banner "
                                                 "doesn't look like TLS - please investigate",
                                             }
                                         ),
@@ -517,7 +531,7 @@ async def test_reviewer_escalates_a_bad_finding_to_sinverguenza(databases, monke
         [],
         dry_run=False,
         entry_agent="reviewer",
-        message="service found: 192.168.1.12:443 claims https",
+        message="service found: 10.0.0.12:443 claims https",
     )
     await run_agent(databases, run_id)
 
@@ -533,41 +547,76 @@ async def test_reviewer_escalates_a_bad_finding_to_sinverguenza(databases, monke
     assert any("please investigate" in p for p in prompts)
 
 
-async def test_a_finding_reaches_the_reporter(databases, monkeypatch):
+def _tool_call(name: str, **arguments) -> dict:
+    call = {"id": "1", "type": "function", "function": {"name": name, "arguments": json.dumps(arguments)}}
+    return {"choices": [{"message": {"content": "", "tool_calls": [call]}}]}
+
+
+def _text(content: str) -> dict:
+    return {"choices": [{"message": {"content": content}}]}
+
+
+async def test_a_run_ends_with_one_report_per_network_not_one_per_result(databases, monkeypatch):
     async with databases.app_session_factory() as session:
         await ensure_default_agents(session)
         keep = ("bellaco", "reporter")
         await session.execute(update(AiAgent).where(AiAgent.name.not_in(keep)).values(enabled=False))
+        site = Site(name="home")
+        session.add(site)
+        await session.flush()
+        lab = Network(site_id=site.id, name="Lab", cidr="10.0.0.0/24")
+        session.add(lab)
+        await session.flush()
+        session.add_all(
+            [
+                Device(
+                    site_id=site.id,
+                    display_name="web1",
+                    primary_ip="10.0.0.5",
+                    device_type=DeviceType.LINUX,
+                    network_id=lab.id,
+                ),
+                Device(
+                    site_id=site.id,
+                    display_name="db1",
+                    primary_ip="10.0.0.6",
+                    device_type=DeviceType.LINUX,
+                    network_id=lab.id,
+                ),
+            ]
+        )
         await session.commit()
-    prompts: list[str] = []
+    reporter_prompts: list[str] = []
 
     async def fake(**kwargs):
-        system = kwargs["messages"][0]["content"]
-        user = kwargs["messages"][1]["content"]
-        prompts.append(user)
+        system, history = kwargs["messages"][0]["content"], kwargs["messages"]
         if "agent 'bellaco'" in system:
-            return {"choices": [{"message": {"content": "web1: warning, 12 packages upgradable"}}]}
-        return {"choices": [{"message": {"content": "Report written."}}]}
+            if len(history) <= 2:
+                return _tool_call(
+                    "record_finding", ip="10.0.0.5", kind="os", title="Debian 12.5", detail="kernel 6.1"
+                )
+            return _text("web1: Debian 12.5")
+        if len(history) <= 2:
+            reporter_prompts.append(history[1]["content"])
+            return _tool_call("save_report", title="x", content="Web1 is current; db1 was not checked.")
+        return _text("Done.")
 
     monkeypatch.setattr("app.llm.orchestrator.call_chat_completions", fake)
     run_id = await create_run(databases, [], dry_run=False, entry_agent="bellaco", message="check web1")
     await run_agent(databases, run_id)
 
     async with databases.app_session_factory() as session:
-        messages = list(await session.scalars(select(AiMessage).where(AiMessage.run_id == run_id)))
-        reporter_steps = list(
-            await session.scalars(
-                select(AiRunStep).where(AiRunStep.run_id == run_id, AiRunStep.agent == "reporter")
-            )
-        )
-    assert "result.bellaco" in {m.topic for m in messages}
-    assert reporter_steps, "the reporter handled nothing"
-    assert any("12 packages upgradable" in p and "result.bellaco" in p for p in prompts)
+        reports = list(await session.scalars(select(Report)))
+    assert len(reports) == 1, "one network, one report - not one per agent result"
+    assert len(reporter_prompts) == 1 and "Run-end summary request" in reporter_prompts[0]
+    report = reports[0]
+    assert (report.scope, report.run_id, report.source) == ("Lab", run_id, "run")
+    assert "Debian 12.5" in report.content
+    assert "Web1 is current; db1 was not checked." in report.content
+    assert "Not assessed" in report.content and "db1" in report.content.split("Not assessed")[1]
 
 
-async def test_reporter_saves_a_report_for_a_routine_reviewer_result(databases, monkeypatch):
-    """Previously a plain, non-escalated reviewer result was just acknowledged with no save_report
-    call; the rewritten reporter now condenses every agent-topic result into a real report."""
+async def test_a_result_message_does_not_make_the_reporter_write_a_report(databases, monkeypatch):
     async with databases.app_session_factory() as session:
         await ensure_default_agents(session)
         keep = ("reviewer", "reporter")
@@ -575,50 +624,41 @@ async def test_reporter_saves_a_report_for_a_routine_reviewer_result(databases, 
         await session.commit()
 
     async def fake(**kwargs):
-        system = kwargs["messages"][0]["content"]
-        history = kwargs["messages"]
-        if "agent 'reviewer'" in system:
-            return {"choices": [{"message": {"content": "Identified: port 443 is https."}}]}
-        if len(history) <= 2:
-            return {
-                "choices": [
-                    {
-                        "message": {
-                            "content": "",
-                            "tool_calls": [
-                                {
-                                    "id": "1",
-                                    "type": "function",
-                                    "function": {
-                                        "name": "save_report",
-                                        "arguments": json.dumps(
-                                            {"title": "Reviewer check", "content": "## Reviewer\nConfirmed."}
-                                        ),
-                                    },
-                                }
-                            ],
-                        }
-                    }
-                ]
-            }
-        return {"choices": [{"message": {"content": "Report saved."}}]}
+        return _text("Identified: port 443 is https.")
 
     monkeypatch.setattr("app.llm.orchestrator.call_chat_completions", fake)
     run_id = await create_run(
-        databases,
-        [],
-        dry_run=False,
-        entry_agent="reviewer",
-        message="service found: 192.168.1.12:443 claims https",
+        databases, [], dry_run=False, entry_agent="reviewer", message="service found: 10.0.0.12:443"
     )
     await run_agent(databases, run_id)
 
     async with databases.app_session_factory() as session:
-        tool_steps = list(
+        reporter_steps = list(
             await session.scalars(
-                select(AiRunStep).where(
-                    AiRunStep.run_id == run_id, AiRunStep.agent == "reporter", AiRunStep.kind == "tool"
-                )
+                select(AiRunStep).where(AiRunStep.run_id == run_id, AiRunStep.agent == "reporter")
             )
         )
-    assert any(s.name == "save_report" for s in tool_steps)
+        reports = list(await session.scalars(select(Report)))
+    assert reporter_steps == [] and reports == []
+
+
+async def test_run_reports_backfill_adds_the_tool_and_keeps_edited_prompts(databases):
+    async with databases.app_session_factory() as session:
+        await ensure_default_agents(session)
+        settings = await ensure_default_ai_mode_settings(session)
+        agents = {a.name: a for a in await session.scalars(select(AiAgent))}
+        agents["bellaco"].enabled_tools = [
+            t for t in agents["bellaco"].enabled_tools if t != "record_finding"
+        ]
+        agents["sinverguenza"].enabled_tools = [
+            t for t in agents["sinverguenza"].enabled_tools if t != "record_finding"
+        ]
+        agents["sinverguenza"].system_prompt = "my own prompt"
+        settings.run_reports_seeded = False
+        await session.commit()
+    async with databases.app_session_factory() as session:
+        await ensure_default_agents(session)
+    agents = await _agents(databases)
+    assert "record_finding" in agents["bellaco"].enabled_tools
+    assert "record_finding" in agents["sinverguenza"].enabled_tools
+    assert agents["sinverguenza"].system_prompt == "my own prompt"

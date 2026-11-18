@@ -1,3 +1,4 @@
+import hashlib
 import json
 from pathlib import Path
 from typing import Any
@@ -14,37 +15,15 @@ from app.domain.models import (
     Site,
     TelegramConfig,
 )
+from app.prompts import load_prompt
 
 DEFAULT_SITE_NAME = "Default"
 HEXSTRIKE_TOOLS_FILE = Path(__file__).parent / "hexstrike_tools.json"
-HEXSTRIKE_MCP_URL = "http://192.168.1.10:8891/mcp"
+HEXSTRIKE_MCP_URL = "http://10.0.0.10:8891/mcp"
 """Changing HexStrike VMs afterward is a one-field edit (tajonaso's "MCP server override" on its edit
 page, AiAgent.mcp_url_override), not a reseed - this constant only matters for a brand-new install."""
 
-TAJONASO_PROMPT = (
-    "Offensive security tester for hosts on this LAN, using the HexStrike AI tools. You are "
-    "authorized to test only the host(s) you are given. For each target: first recon (nmap_scan or "
-    "similar) to find open ports and services, then pick a bounded, sensible next step from your "
-    "tools (credential attacks, known-vulnerability scans, misconfiguration checks) based on what "
-    "recon actually found - don't run tools against services that aren't present. "
-    "Never repeat a tool call with the same arguments twice - if a result doesn't change your plan, "
-    "try something different or move on. Where a tool accepts several values at once (several "
-    "usernames or passwords in one credential-attack call, several ports or scripts in one scan), "
-    "try them together in one call rather than one value per call. If you aren't certain a "
-    "parameter value is real (a CVE id, a template name, a wordlist path) - check it first (for "
-    "example, list what's actually on disk) or omit it; never invent a plausible-looking one. "
-    "Report only what a tool call actually returned. If a tool errors, times out, or a server is "
-    "unreachable, say so plainly and either retry once with different parameters or move on - never "
-    "invent a result, a credential, or an outcome a tool did not really produce, even to make the "
-    "task look complete; a failed or incomplete attempt is a valid, useful outcome to report. "
-    "Before your final answer, call save_report once with a title naming the target(s) and a "
-    "Markdown report covering: Findings (open ports/services actually found), Issues (anything "
-    "insecure, misconfigured, or exploitable you actually confirmed - or confirmed you could not, "
-    "e.g. 'SSH brute force attempted, no weak credential found'), and Opportunities to improve "
-    "(concrete, specific recommendations for hardening what you tested - not generic advice). Base "
-    "every line on tool output, never on what you expected to find. Final answer after saving: one "
-    "short sentence confirming the report was saved."
-)
+TAJONASO_PROMPT = load_prompt("tajonaso")
 
 
 async def ensure_default_site(session: AsyncSession) -> Site:
@@ -120,12 +99,7 @@ LEGACY_REVIEWER_PROMPT_PRE_NMAP = (
 )
 """The reviewer prompt as it stood before it took over service identification from discoverer -
 frozen so the nmap-handoff backfill can tell an unedited install apart from a customized one."""
-REVIEWER_PROMPT = (
-    "Each message names a host and open ports to identify. Run run_nmap -Pn -sT -sV -T4 -p <ports>; "
-    "if it can't identify a port, try run_nc once. Call record_service for each service found. If a "
-    "port stays unidentified or looks suspicious, publish_message to task.sinverguenza with the host, "
-    "port and issue. Reply with one short summary sentence."
-)
+REVIEWER_PROMPT = load_prompt("reviewer")
 
 
 LEGACY_REPORTER_PROMPT = (
@@ -174,26 +148,7 @@ LEGACY_REPORTER_PROMPT_PRE_DELTA = (
 )
 """The reporter prompt as it stood before get_status_delta - frozen so the delta-reporting backfill
 can tell an unedited install apart from one whose prompt a human already customized."""
-REPORTER_PROMPT = (
-    "You write reports - you never call another agent, investigate or change anything yourself; you "
-    "only read tool output and save a Markdown report with save_report, then reply with one sentence."
-    " If this message is a direct task (its topic is not result.<agent>), call get_status_delta with "
-    "no hosts to get the current network state plus what changed since the last saved report. Write "
-    "a Markdown report: summary, Networks, Devices, Services (grouped by host, with product/version), "
-    "Active alerts, Recommendations, and always a Changes since last report section listing what the "
-    "delta showed (devices/services added, removed or changed status; alerts newly firing or "
-    "resolved) - say plainly if nothing changed. Use only tool output, never invent numbers."
-    " If this message is a result from another agent (its topic is result.<agent>), say plainly at "
-    "the top of the report which agent it came from and focus on what that agent discovered - do not "
-    "describe the whole network. Call get_status_delta with hosts set to exactly the host(s) that "
-    "result is about, check the finding is internally consistent with that tool output (the verdict "
-    "matches the evidence, nothing contradicts the current state), and show what changed for that "
-    "host since the last report the same way. Condense everything into one report either way - do not "
-    "just acknowledge without saving one. If the result is marked incomplete (the agent stopped at its "
-    "iteration limit without a real conclusion), skip get_status_delta and don't invent findings: "
-    "state plainly that the investigation of its targets (if any were given) did not complete, and "
-    "recommend re-running it with a higher iteration limit or a narrower target list."
-)
+REPORTER_PROMPT = load_prompt("reporter")
 SECURITY_AGENT_NAMES = ("bellaco", "sinverguenza")
 SECURITY_RESULT_TOPICS = [f"result.{name}" for name in SECURITY_AGENT_NAMES]
 
@@ -205,18 +160,9 @@ _HOW_TO_INSPECT = (
     "every target. Base statements only on tool output - never invent, and say when something couldn't "
     "be checked."
 )
-BELLACO_PROMPT = (
-    "System-health agent. For each host, report: OS and hardware (uname -a, cat /etc/os-release, cat "
-    "/proc/cpuinfo on linux; Get-ComputerInfo on windows; /nodes/<node>/status on proxmox), patch level "
-    "(apt list --upgradable / dnf check-update / Get-HotFix / proxmox's apt/update), load/memory "
-    "(uptime, free -m, vmstat), full disks (df -h), failed services (systemctl list-units --failed), "
-    "pending reboot (ls /var/run/reboot-required), time drift, old kernels. "
-    + _HOW_TO_INSPECT
-    + " Call apply_updates only if explicitly asked - list expected changes first, then call once per "
-    "host; a human approves each call. Routine discoverer/reviewer result with nothing wrong: reply "
-    "briefly, do nothing further. Final answer: one Markdown section per host - OS/Hardware, Patch "
-    "level, Severity (critical/warning/info), Finding, Recommendation."
-)
+"""Shared fragment, inlined into the live bellaco.md/sinverguenza.md prompt files. Kept here as Python
+too only because LEGACY_SINVERGUENZA_PROMPT below still composes with it and must stay frozen."""
+BELLACO_PROMPT = load_prompt("bellaco")
 LEGACY_SINVERGUENZA_PROMPT = (
     "You are Sinverguenza, a security-incident investigator inside a home-LAN monitoring platform. You "
     "cannot change anything. For linux look at logins (last, lastb, journalctl -u ssh, grep failed "
@@ -236,23 +182,7 @@ LEGACY_SINVERGUENZA_PROMPT = (
 # Absorbs Maestro's forensic scope (timeline, artifacts, hashing, VirusTotal) after that agent was
 # retired - see docs/decisions.md. Deliberately simpler than concatenating both old prompts: one
 # investigator, one job (find and publish), no report-writing of its own (that stays reporter's job).
-SINVERGUENZA_PROMPT = (
-    "Security investigator - investigate only, never change anything. Given a host or indicator, look "
-    "for unauthorized access, malicious files, suspicious/persistent processes, unexpected connections, "
-    "tampered accounts or SSH keys, signs of a cleared trail; build a quick timeline. Linux: last/lastb, "
-    "journalctl -u ssh, grep failed /var/log/auth.log, ss -tulpn, ps aux, getent passwd, crontab -l, "
-    "~/.ssh/authorized_keys, find /tmp /var/tmp -newer /etc/hostname -type f. Windows: Get-WinEvent "
-    "-LogName Security, Get-LocalUser, Get-LocalGroupMember -Group Administrators, Get-ScheduledTask, "
-    "Get-NetTCPConnection, Get-MpThreatDetection. Proxmox: /nodes/<node>/tasks, /syslog. Web: "
-    "http_inspect. Hash anything suspicious (sha256sum / Get-FileHash); check hashes, public IPs/domains "
-    "with virustotal_lookup if enabled (rate limited and refuses private values - check only what "
-    "matters). "
-    + _HOW_TO_INSPECT
-    + " Budget about two thirds of your tool calls for evidence, then publish what you have - partial "
-    "findings beat none. Routine discoverer/reviewer result with nothing wrong: reply briefly, do "
-    "nothing further. Final answer: per host, Verdict (suspicious / needs attention / no evidence "
-    "found), quoted evidence, your confidence, and next steps. Never speculate beyond the evidence."
-)
+SINVERGUENZA_PROMPT = load_prompt("sinverguenza")
 
 
 def security_agents() -> list[AiAgent]:
@@ -274,7 +204,13 @@ def security_agents() -> list[AiAgent]:
             "bellaco",
             "Finds performance, update and health problems on hosts through their integrations",
             BELLACO_PROMPT,
-            [*_INSPECTION_TOOLS, "get_network_snapshot", "apply_updates", "submit_http_form"],
+            [
+                *_INSPECTION_TOOLS,
+                "get_network_snapshot",
+                "apply_updates",
+                "submit_http_form",
+                "record_finding",
+            ],
             20,
             allow_changes=True,
         ),
@@ -282,7 +218,7 @@ def security_agents() -> list[AiAgent]:
             "sinverguenza",
             "Investigates security incidents on hosts, read-only; forensics and VirusTotal lookups included",
             SINVERGUENZA_PROMPT,
-            [*_INSPECTION_TOOLS, "http_inspect", "submit_http_form"],
+            [*_INSPECTION_TOOLS, "http_inspect", "submit_http_form", "record_finding"],
             45,  # a real investigation (list targets, http_inspect, ssh_readonly, file reads) ran past 25
         ),
     ]
@@ -367,6 +303,10 @@ async def ensure_default_agents(session: AsyncSession) -> None:
         await _seed_reporter_deltas(session)
         settings.reporter_computes_deltas_seeded = True
         changed = True
+    if not settings.run_reports_seeded:
+        await _seed_run_reports(session)
+        settings.run_reports_seeded = True
+        changed = True
     if not settings.tajonaso_seeded:
         await _seed_tajonaso(session)
         settings.tajonaso_seeded = True
@@ -408,7 +348,7 @@ async def _seed_tajonaso(session: AsyncSession) -> None:
                 mcp_url_override=HEXSTRIKE_MCP_URL,
                 mcp_timeout_seconds=120.0,
                 # Several HexStrike tools (a full port-range nmap scan, a wordlist-based brute-force
-                # attempt) genuinely run past the 30s default - see docs/tajonaso-model-comparison.md.
+                # attempt) genuinely run past the 30s default.
                 max_iterations=30,
                 # 15 was too low: both measured runs hit the limit without concluding - same source.
                 subscribes=[],
@@ -480,6 +420,30 @@ async def _seed_reporter_deltas(session: AsyncSession) -> None:
             reporter.enabled_tools = [*reporter.enabled_tools, "get_status_delta"]
         if reporter.system_prompt == LEGACY_REPORTER_PROMPT_PRE_DELTA:
             reporter.system_prompt = REPORTER_PROMPT
+
+
+PRE_RUN_REPORT_PROMPT_HASHES = {
+    "bellaco": "0d6c06697d33c186",
+    "sinverguenza": "cad9ec1c2324ddf3",
+    "reporter": "61c3f4ec24d52019",
+}
+"""sha256 prefixes of the stock prompts before per-network run reports, so the backfill can tell an
+unedited install from a customized one without carrying a second copy of each prompt."""
+
+
+async def _seed_run_reports(session: AsyncSession) -> None:
+    """bellaco and sinverguenza additively get record_finding, and bellaco, sinverguenza and reporter get
+    the prompts that use it, only if the prompt was never edited. Added once, same one-shot pattern as
+    every other backfill in this file."""
+    for name in (*SECURITY_AGENT_NAMES, "reporter"):
+        agent = await session.scalar(select(AiAgent).where(AiAgent.name == name))
+        if agent is None:
+            continue
+        if name != "reporter" and "record_finding" not in agent.enabled_tools:
+            agent.enabled_tools = [*agent.enabled_tools, "record_finding"]
+        digest = hashlib.sha256(agent.system_prompt.encode()).hexdigest()[:16]
+        if digest == PRE_RUN_REPORT_PROMPT_HASHES[name]:
+            agent.system_prompt = load_prompt(name)
 
 
 async def _merge_maestro_into_sinverguenza(session: AsyncSession) -> None:

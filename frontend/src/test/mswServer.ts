@@ -6,6 +6,8 @@ export const server = setupServer(
   http.get('/api/maintenance/counts', () =>
     HttpResponse.json({ reports: 0, events: 0, alerts: 0, bus: 0, history: 0, ai_runs: 0, audit: 0 }),
   ),
+  // AgentDetail shows an agent's own reports (if any), so every test rendering it needs this mocked.
+  http.get('/api/reports', () => HttpResponse.json([])),
   http.get('/api/overview', () =>
     HttpResponse.json({
       devices: { up: 0, down: 0, degraded: 0, unknown: 0 },
@@ -21,6 +23,9 @@ export const server = setupServer(
   // AppShell (directly or via App) needs this mocked - not just ChatPanel's
   // own tests.
   http.get('/api/assistant/messages', () => HttpResponse.json([])),
+  // Agent/AI Mode settings forms list stored credentials to offer as an OpenRouter key picker;
+  // most tests don't care, so default to empty rather than mocking it everywhere.
+  http.get('/api/credentials', () => HttpResponse.json([])),
   // The top bar shows the continuous-loop indicator on every page.
   http.get('/api/ai-mode/status', () =>
     HttpResponse.json({

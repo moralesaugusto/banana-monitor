@@ -99,6 +99,107 @@ async def test_the_openrouter_catalog_is_priced_per_million_tokens(
     assert usage_module.CATALOG_TTL_SECONDS > 0
 
 
+async def test_actual_usd_prices_each_openrouter_call_at_its_own_models_real_rate(
+    client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def fake_catalog() -> list[dict]:
+        return [
+            {
+                "id": "a/b", "name": "AB", "context_length": 32000,
+                "usd_per_million_in": 1.0, "usd_per_million_out": 2.0, "tools": True,
+            }
+        ]
+
+    monkeypatch.setattr("app.llm.usage.openrouter_catalog", fake_catalog)
+    await record_usage(
+        get_databases(), source="agent", agent="discoverer", provider="openrouter", model="a/b",
+        prompt_tokens=1_000_000, completion_tokens=500_000,
+    )
+    # An Ollama call must never be priced - it is free/local by definition.
+    await record_usage(
+        get_databases(), source="agent", agent="discoverer", provider="ollama", model="llama3",
+        prompt_tokens=1_000_000, completion_tokens=1_000_000,
+    )
+
+    body = (await client.get("/api/ai-mode/cost")).json()
+
+    assert body["actual_usd"] == pytest.approx(1.0 * 1.0 + 0.5 * 2.0)
+
+
+async def test_crossing_the_cost_budget_sends_one_telegram_alert_and_not_again(
+    client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from app.domain.bootstrap import ensure_default_telegram_config
+
+    async def fake_catalog() -> list[dict]:
+        return [
+            {
+                "id": "a/b", "name": "AB", "context_length": 32000,
+                "usd_per_million_in": 10.0, "usd_per_million_out": 10.0, "tools": True,
+            }
+        ]
+
+    monkeypatch.setattr("app.llm.usage.openrouter_catalog", fake_catalog)
+    sent: list[tuple[float, float]] = []
+    monkeypatch.setattr(
+        "app.telegram.bot.notify_cost_budget_exceeded",
+        lambda databases, actual, budget: sent.append((actual, budget)),
+    )
+    await client.put("/api/ai-mode/settings", json={"cost_budget_usd": 1.0})
+    databases = get_databases()
+    async with databases.app_session_factory() as session:
+        config = await ensure_default_telegram_config(session)
+        config.enabled = True
+        await session.commit()
+
+    async def record_openrouter_call() -> None:
+        await record_usage(
+            databases, source="agent", agent="discoverer", provider="openrouter", model="a/b",
+            prompt_tokens=1_000_000, completion_tokens=0,
+        )
+
+    await record_openrouter_call()  # $10, already over the $1 budget
+    await record_openrouter_call()  # stays over - must not alert again
+
+    assert len(sent) == 1
+    assert sent[0][0] > 1.0
+
+
+async def test_changing_the_budget_rearms_the_alert(
+    client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def fake_catalog() -> list[dict]:
+        return [
+            {
+                "id": "a/b", "name": "AB", "context_length": 32000,
+                "usd_per_million_in": 10.0, "usd_per_million_out": 0.0, "tools": True,
+            }
+        ]
+
+    monkeypatch.setattr("app.llm.usage.openrouter_catalog", fake_catalog)
+    sent: list[float] = []
+    monkeypatch.setattr(
+        "app.telegram.bot.notify_cost_budget_exceeded",
+        lambda databases, actual, budget: sent.append(actual),
+    )
+    databases = get_databases()
+
+    async def record_openrouter_call() -> None:
+        await record_usage(
+            databases, source="agent", agent="discoverer", provider="openrouter", model="a/b",
+            prompt_tokens=1_000_000, completion_tokens=0,
+        )
+
+    await client.put("/api/ai-mode/settings", json={"cost_budget_usd": 1.0})
+    await record_openrouter_call()
+    assert len(sent) == 1
+
+    await client.put("/api/ai-mode/settings", json={"cost_budget_usd": 2.0})
+    await record_openrouter_call()
+
+    assert len(sent) == 2
+
+
 async def test_chat_calls_are_counted_as_the_chat_assistant(
     client: AsyncClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:

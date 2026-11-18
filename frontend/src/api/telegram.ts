@@ -7,6 +7,7 @@ export interface TelegramConfig {
   chat_ids: number[]
   notify_alerts: boolean
   notify_ai_reports: boolean
+  notify_cost_budget: boolean
 }
 
 export type TelegramUpdate = Partial<Omit<TelegramConfig, 'token_set'>> & { bot_token?: string }

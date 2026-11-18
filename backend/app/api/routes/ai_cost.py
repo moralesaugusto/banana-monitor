@@ -11,7 +11,10 @@ from pydantic import BaseModel
 from app.api.deps import AppSession
 from app.domain.bootstrap import ensure_default_ai_mode_settings
 from app.domain.models import utcnow
-from app.llm.usage import Totals, first_day, openrouter_catalog, reset_usage, usage_rows
+from app.llm.usage import Totals, actual_usd_spent, first_day, openrouter_catalog, reset_usage, usage_rows
+from app.logging_setup import get_logger
+
+logger = get_logger(__name__)
 
 router = APIRouter(prefix="/ai-mode/cost", tags=["ai-cost"])
 
@@ -53,6 +56,10 @@ class CostRead(BaseModel):
     by_agent: list[AgentUsage]
     by_model: list[ModelUsage]
     by_day: list[DayUsage]
+    actual_usd: float
+    """What this actually cost: each OpenRouter call priced at its own model's real rate;
+    Ollama calls are always free. 0.0 (not an error) if the OpenRouter catalog can't be reached
+    right now - a transient price-lookup failure should never break the rest of this page."""
 
 
 class CatalogModel(BaseModel):
@@ -90,8 +97,14 @@ async def get_cost(session: AppSession) -> CostRead:
         agent_models[(row.source, row.agent)].add(row.model)
         models[(row.provider, row.model)].add(row)
         days[row.day].add(row)
+    try:
+        actual_usd = await actual_usd_spent(session)
+    except httpx.HTTPError:
+        logger.warning("actual_usd_unavailable", exc_info=True)
+        actual_usd = 0.0
     return CostRead(
         since=settings.usage_reset_at,
+        actual_usd=actual_usd,
         first_day=await first_day(session),
         totals=UsageTotals(**_totals(overall)),
         by_agent=sorted(
@@ -120,6 +133,7 @@ async def reset_cost(session: AppSession) -> None:
     settings = await ensure_default_ai_mode_settings(session)
     await reset_usage(session)
     settings.usage_reset_at = utcnow()
+    settings.cost_budget_alert_sent = False
     await session.commit()
 
 

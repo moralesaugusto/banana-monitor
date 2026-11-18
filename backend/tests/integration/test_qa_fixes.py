@@ -1,4 +1,4 @@
-"""Regression tests for docs/qa/bugs.md (2026-10-14 browser QA)."""
+"""Regression tests for problems found in browser QA (2026-10-14)."""
 
 import pytest
 from httpx import AsyncClient
@@ -33,9 +33,7 @@ async def test_a_deleted_device_is_provisioned_again_on_rediscovery(client: Asyn
 
 async def test_a_stale_candidate_link_is_repaired_on_observation(client: AsyncClient) -> None:
     device_id = await _observe()
-    async with get_databases().app_session_factory() as session:
-        await session.delete(await session.get(Device, device_id))
-        await session.commit()
+    assert (await client.delete(f"/api/devices/{device_id}")).status_code == 204
 
     new_id = await _observe()
     async with get_databases().app_session_factory() as session:

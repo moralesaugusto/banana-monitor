@@ -38,9 +38,10 @@ async def test_ensure_self_health_device_creates_and_reuses(databases) -> None:
 
 
 class RecordingMetricsWriter:
-    def __init__(self) -> None:
+    def __init__(self, dropped: int = 0) -> None:
         self.samples: list[dict] = []
         self.check_results: list[dict] = []
+        self.dropped = dropped
 
     def enqueue_check_result(self, **kwargs) -> None:
         self.check_results.append(kwargs)
@@ -71,3 +72,17 @@ async def test_run_once_reports_metrics_and_marks_device_up(databases) -> None:
         device = await session.get(Device, device_id)
         assert device.status == HealthStatus.UP
         assert device.last_seen_at is not None
+
+
+@pytest.mark.asyncio
+async def test_run_once_reports_the_metrics_backlog_dropped_count(databases) -> None:
+    from app.config import get_settings
+
+    writer = RecordingMetricsWriter(dropped=42)
+    supervisor = PollingSupervisor(databases, MetricsWriter(databases))
+    monitor = SelfHealthMonitor(databases, writer, get_settings(), supervisor)
+
+    await monitor.run_once()
+
+    sample = next(s for s in writer.samples if s["metric_name"] == "metrics_backlog_dropped_total")
+    assert sample["value"] == 42.0

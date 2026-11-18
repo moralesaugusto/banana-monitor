@@ -54,6 +54,22 @@ export function useCreateIntegration() {
   })
 }
 
+export interface IntegrationUpdate {
+  name?: string
+  config?: Record<string, unknown>
+  credential_id?: number | null
+  enabled?: boolean
+}
+
+export function useUpdateIntegration() {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: ({ id, ...payload }: IntegrationUpdate & { id: number }) =>
+      api.patch<Integration>(`/integrations/${id}`, payload),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['integrations'] }),
+  })
+}
+
 /** Toggles enabled on/off - pauses a wallet entry (or any integration) without deleting it. */
 export function useSetIntegrationEnabled() {
   const queryClient = useQueryClient()

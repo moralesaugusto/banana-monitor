@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { Link } from 'react-router-dom'
-import { useAgents, useAiRun, useAiRuns, useMessages } from '../../api/aiMode'
+import { useAgents, useAiRun, useAiRuns, useMessages, useToolUsage } from '../../api/aiMode'
 import { Card } from '../../components/Card'
 import { PageHeader } from '../../components/PageHeader'
 import { explainMessage, messageText, topicMatches } from '../../lib/bus'
@@ -11,6 +11,17 @@ const LOOP = [
   { title: '2. Decide', body: 'It picks the next move: call a tool such as nmap, or stop and write an answer. It is guessing the most useful next step, like an engineer would.' },
   { title: '3. Act', body: 'This application checks the request against the guardrails, runs the real command, and captures the output.' },
   { title: '4. Learn', body: 'The output goes back to the model as a new message. It reads it, and the loop repeats until it is done or hits its loop limit.' },
+]
+
+/** In the order a call really meets them: see orchestrator._run_tool and tool_pipeline.trace_call. */
+const TOOL_GATES = [
+  { title: 'Does this agent hold the tool?', body: 'The model is only offered the tools enabled for that agent. Asking for any other name is refused, however it is worded.' },
+  { title: 'May the agent change hosts?', body: 'Only apply_updates changes a machine. An agent without "May change hosts" cannot use it, whatever the model asks.' },
+  { title: 'Does a human approve it?', body: 'Host-changing tools always wait for a person. Other tools wait only if the agent is set to ask before tool calls. The run pauses until you answer.' },
+  { title: 'Do your guardrails allow the arguments?', body: 'Your regular-expression rules look at every argument value, including list items such as nmap flags. A rule covers custom and host-inspection tools by default, or every tool if you set it to.' },
+  { title: 'Is the internet allowed?', body: 'Web tools stop at the administrator\'s kill switch, which no agent can change.' },
+  { title: 'Do the tool\'s own checks pass?', body: 'This is where most refusals happen: the target must be inside a configured network, nmap flags must be on an allowlist, an SSH command must be read-only, a URL must be public. Each tool has its own.' },
+  { title: 'Run, then trim', body: 'Only now does anything run, as a program on the Banana host, inside the Banana process, over the network, or on the target machine. The output is cut to a fixed size and handed back to the model as a new message.' },
 ]
 
 const TIMING_CONCEPTS = [
@@ -83,6 +94,9 @@ export function AiLearnPage() {
   const { data: run } = useAiRun(finished?.id)
   const { data: messages } = useMessages(finished?.id)
   const { list: agents } = useAgents()
+  const stopped = useToolUsage().data
+    ?.filter((u) => u.stopped_run_id != null)
+    .sort((a, b) => (b.stopped_run_id ?? 0) - (a.stopped_run_id ?? 0))[0]
 
   return (
     <div>
@@ -174,6 +188,45 @@ export function AiLearnPage() {
           </table>
         </Card>
       )}
+
+      <h2 className="mt-8 text-lg font-semibold">Part 4: tools and guardrails</h2>
+      <p className="mt-2 max-w-3xl text-sm text-fg-muted">
+        A model cannot run anything. It can only ask for a tool by name, with arguments. This application decides
+        whether to allow that and does the work, so the model is the first of several layers, and the least trusted. A
+        request meets these steps in order, and the first one to refuse ends the call; the model is told why and can try
+        something else.
+      </p>
+      <ol className="mt-3 grid gap-3 md:grid-cols-2">
+        {TOOL_GATES.map((g, i) => (
+          <li key={g.title}>
+            <Card className="h-full p-4">
+              <div className="text-sm font-semibold text-fg">{i + 1}. {g.title}</div>
+              <p className="mt-2 text-sm text-fg-muted">{g.body}</p>
+            </Card>
+          </li>
+        ))}
+      </ol>
+      <Card className="mt-3 p-4">
+        {stopped ? (
+          <p className="text-sm">
+            A real one from your history: in{' '}
+            <Link className="text-accent-strong hover:underline" to={`/ai/runs/${stopped.stopped_run_id}`}>run #{stopped.stopped_run_id}</Link>
+            , the model asked for <span className="font-mono">{stopped.name}</span> with{' '}
+            <span className="font-mono">{JSON.stringify(stopped.stopped_request)}</span> and was stopped:{' '}
+            <span className="text-red-600">{stopped.stopped_reason}</span>
+          </p>
+        ) : (
+          <p className="text-sm text-fg-muted">
+            No call has been stopped yet. When one is, it appears here with the reason.
+          </p>
+        )}
+        <p className="mt-2 text-sm text-fg-muted">
+          Each tool&apos;s card on the{' '}
+          <Link className="text-accent-strong hover:underline" to="/ai/tools">Tools and guardrails</Link>{' '}
+          page says where it runs and what limits it, and "Try a call" walks a call you write through these steps
+          without running anything.
+        </p>
+      </Card>
 
       <h2 className="mt-8 text-lg font-semibold">A real run: the messages</h2>
       {!run && (

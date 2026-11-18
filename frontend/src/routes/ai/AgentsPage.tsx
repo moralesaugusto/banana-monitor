@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { Link, useParams } from 'react-router-dom'
-import { agentLabel, type Agent, type AgentStateName, useAgents, useAiStatus } from '../../api/aiMode'
+import { agentLabel, type Agent, type AgentStateName, useAgents, useAiModeSettings, useAiStatus } from '../../api/aiMode'
 import { Card } from '../../components/Card'
 import { PageHeader } from '../../components/PageHeader'
 import { Segmented } from '../../components/Segmented'
@@ -28,7 +28,17 @@ function AgentRow({ agent, state, queued, selected }: { agent: Agent; state: Age
       }`}
     >
       <div className="flex items-center justify-between gap-2">
-        <span className="truncate text-sm font-semibold" title={agent.name}>{agentLabel(agent)}</span>
+        <span className="flex items-center gap-1.5 truncate text-sm font-semibold" title={agent.name}>
+          {agentLabel(agent)}
+          {!!agent.memory_count && (
+            <span
+              title={`${agent.memory_count} saved memory note(s)`}
+              className="rounded-full bg-accent-soft-strong px-1.5 py-0.5 text-[10px] font-semibold text-accent-strong"
+            >
+              {agent.memory_count}
+            </span>
+          )}
+        </span>
         <StateBadge state={state} queued={queued} />
       </div>
       <div className="mt-0.5 truncate text-xs text-fg-muted">{agent.role || 'No role description.'}</div>
@@ -43,6 +53,13 @@ export function AgentsPage() {
   const { name } = useParams<{ name: string }>()
   const agents = useAgents()
   const { data: status } = useAiStatus()
+  const { data: aiSettings } = useAiModeSettings()
+  const safeguardsRelaxed =
+    !!aiSettings &&
+    (aiSettings.cred_allow_unlisted_hosts ||
+      aiSettings.cred_no_attempt_limit ||
+      aiSettings.cred_trust_new_host_keys ||
+      aiSettings.cred_pool_for_updates)
   const [query, setQuery] = useState('')
   const [filter, setFilter] = useState<StateFilter>('all')
 
@@ -70,6 +87,17 @@ export function AgentsPage() {
           </Link>
         }
       />
+      {safeguardsRelaxed && (
+        <p
+          role="status"
+          className="mt-4 rounded-control border border-red-300 bg-red-50 px-3 py-2 text-sm font-medium text-red-900 dark:border-red-900/50 dark:bg-red-950/30 dark:text-red-200"
+        >
+          Credential safeguards are relaxed.{' '}
+          <Link to="/ai/config" className="underline">
+            Review them in AI Settings
+          </Link>
+        </p>
+      )}
       <RunStatusPanel />
       <div className="mt-6 grid items-start gap-4 lg:grid-cols-[21rem_minmax(0,1fr)]">
         <Card className="p-3 lg:sticky lg:top-4">

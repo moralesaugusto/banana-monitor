@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.background import named_lock
 from app.db.session import Databases
+from app.domain.bootstrap import ensure_default_ai_mode_settings
 from app.domain.models import LlmUsage, utcnow
 from app.llm.provider import OPENROUTER_BASE_URL
 from app.logging_setup import get_logger
@@ -67,6 +68,7 @@ async def record_usage(
             if context == 0:
                 row.calls_without_usage += 1
             await session.commit()
+        await check_cost_budget(databases)
     except Exception:  # noqa: BLE001 - see docstring
         logger.warning("llm_usage_not_recorded", agent=agent, exc_info=True)
 
@@ -129,3 +131,44 @@ async def openrouter_catalog() -> list[dict[str, Any]]:
         )
     _catalog = (time.monotonic(), models)
     return models
+
+
+async def check_cost_budget(databases: Databases) -> None:
+    """Alert-only (docs/decisions.md): never blocks a run. Fires the Telegram notification at
+    most once per crossing - cost_budget_alert_sent stays true until the budget changes or the
+    counters are reset (app.api.routes.ai_mode, app.api.routes.ai_cost), so staying over budget
+    for many calls in a row does not mean many notifications."""
+    async with databases.app_session_factory() as session:
+        settings = await ensure_default_ai_mode_settings(session)
+        budget = settings.cost_budget_usd
+        if not budget or settings.cost_budget_alert_sent:
+            return
+        spent = await actual_usd_spent(session)
+        if spent <= budget:
+            return
+        settings.cost_budget_alert_sent = True
+        await session.commit()
+    # Imported here, not at module level: no real import cycle exists today, but every other
+    # place a notification fires lives in app.telegram.bot, not app.llm.usage - keeping this
+    # import local keeps that boundary visible instead of quietly growing usage.py's module graph.
+    from app.telegram.bot import notify_cost_budget_exceeded
+
+    notify_cost_budget_exceeded(databases, spent, budget)
+
+
+async def actual_usd_spent(session: AsyncSession) -> float:
+    """What was actually spent, not the hypothetical "what if this ran on model X" the Cost tab's
+    model chooser already shows - each OpenRouter call priced at the real rate of the model it
+    actually used; an Ollama call is always free/local, contributing nothing."""
+    rows = await usage_rows(session)
+    catalog = {m["id"]: m for m in await openrouter_catalog()}
+    total = 0.0
+    for row in rows:
+        if row.provider != "openrouter":
+            continue
+        model = catalog.get(row.model)
+        if model is None:
+            continue
+        total += row.prompt_tokens / 1_000_000 * model["usd_per_million_in"]
+        total += row.completion_tokens / 1_000_000 * model["usd_per_million_out"]
+    return total

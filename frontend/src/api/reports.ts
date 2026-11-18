@@ -5,6 +5,8 @@ export interface ReportSummary {
   id: number
   title: string
   source: string
+  run_id: number | null
+  scope: string | null
   created_at: string
 }
 
@@ -59,3 +61,4 @@ export function useDeleteAllReports() {
 }
 
 export const reportPdfUrl = (id: number) => `/api/reports/${id}/pdf`
+export const reportMarkdownUrl = (id: number) => `/api/reports/${id}/markdown`

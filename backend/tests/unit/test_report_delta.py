@@ -71,6 +71,7 @@ def test_no_change_means_empty_delta() -> None:
         "service_status_changes": [],
         "new_alerts": [],
         "resolved_alerts": [],
+        "new_findings": [],
     }
 
 
@@ -82,3 +83,12 @@ def test_a_device_with_no_ip_falls_back_to_its_name_as_the_key() -> None:
     assert delta["device_status_changes"] == [
         {"name": "unassigned-1", "ip": None, "from": "up", "to": "down"}
     ]
+
+
+def test_a_new_finding_is_reported_once_and_a_repeat_is_not() -> None:
+    finding = {"kind": "vulnerability", "severity": "high", "title": "Telnet open", "detail": ""}
+    previous = _snapshot([{**_device("web1", "10.0.0.5", "up"), "findings": []}])
+    current = _snapshot([{**_device("web1", "10.0.0.5", "up"), "findings": [finding]}])
+
+    assert compute_delta(previous, current)["new_findings"] == [{**finding, "host": "web1"}]
+    assert compute_delta(current, current)["new_findings"] == []

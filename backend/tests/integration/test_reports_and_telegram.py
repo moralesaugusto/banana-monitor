@@ -94,6 +94,29 @@ async def test_reporter_agent_is_seeded_and_can_save_a_report(client: AsyncClien
 
 
 @pytest.mark.asyncio
+async def test_save_report_is_attributed_to_the_agent_that_called_it(client: AsyncClient) -> None:
+    """source is 'agent:<name>' per the Report model's own docstring, not the bare 'agent' that would
+    make every agent's report indistinguishable on the agent's own detail page."""
+    databases = get_databases()
+    saved = await dispatch(
+        databases,
+        "save_report",
+        {"title": "T2", "content": "## Hi"},
+        enabled=["save_report"],
+        agent_name="tajonaso",
+    )
+    report = (await client.get(f"/api/reports/{saved['report_id']}")).json()
+    assert report["source"] == "agent:tajonaso"
+
+    # No agent_name (e.g. a manual/legacy call) keeps the old plain "agent" source.
+    saved_no_agent = await dispatch(
+        databases, "save_report", {"title": "T3", "content": "## Hi"}, enabled=["save_report"]
+    )
+    report_no_agent = (await client.get(f"/api/reports/{saved_no_agent['report_id']}")).json()
+    assert report_no_agent["source"] == "agent"
+
+
+@pytest.mark.asyncio
 async def test_save_report_captures_the_current_snapshot(client: AsyncClient) -> None:
     """So a later get_status_delta call has something to diff against."""
     databases = get_databases()
@@ -199,7 +222,7 @@ async def test_telegram_config_never_returns_the_token(client: AsyncClient) -> N
     assert response.status_code == 200
     assert response.json() == {
         "enabled": True, "token_set": True, "chat_ids": [42],
-        "notify_alerts": True, "notify_ai_reports": True,
+        "notify_alerts": True, "notify_ai_reports": True, "notify_cost_budget": True,
     }
     for path in ("/api/telegram/config", "/api/credentials"):
         assert TOKEN not in (await client.get(path)).text

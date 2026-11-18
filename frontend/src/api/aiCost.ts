@@ -35,6 +35,7 @@ export interface Cost {
   by_agent: AgentUsage[]
   by_model: ModelUsage[]
   by_day: DayUsage[]
+  actual_usd: number
 }
 
 export interface CatalogModel {

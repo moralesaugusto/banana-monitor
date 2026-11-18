@@ -25,7 +25,7 @@ from app.db.session import get_databases
 from app.domain.bootstrap import TAJONASO_PROMPT
 from app.domain.models import AiAgent, AiCustomTool
 
-HEXSTRIKE_MCP_URL = "http://192.168.1.10:8891/mcp"
+HEXSTRIKE_MCP_URL = "http://10.0.0.10:8891/mcp"
 TOOLS_FILE = Path(__file__).parent.parent / "app" / "domain" / "hexstrike_tools.json"
 
 

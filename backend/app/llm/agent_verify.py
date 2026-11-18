@@ -18,6 +18,7 @@ from app.llm.bus import topic_matches
 from app.llm.client import LLMRequestError, call_chat_completions, list_models
 from app.llm.inspect_tools import MUTATING_TOOLS
 from app.llm.provider import effective_endpoint, load_api_key
+from app.llm.tool_availability import tool_availability
 
 LATENCY_WARN_SECONDS = 20.0
 LATENCY_TIMEOUT_SECONDS = 45.0
@@ -58,6 +59,7 @@ async def verify_agent(session: AsyncSession, agent: AgentBase, own_id: int | No
         checks.add("name", "ok", "Name is available")
 
     _check_tools(agent, set(await session.scalars(select(AiCustomTool.name))), checks)
+    await _check_tool_availability(session, agent, checks)
     await _check_model(session, agent, checks)
 
     if agent.system_prompt.strip():
@@ -107,6 +109,15 @@ def _check_tools(agent: AgentBase, custom_names: set[str], checks: _Checks) -> N
         checks.add("tools", "ok", f"{len(agent.enabled_tools)} tool(s), all known")
 
 
+async def _check_tool_availability(session: AsyncSession, agent: AgentBase, checks: _Checks) -> None:
+    unusable = [t for t in await tool_availability(session, agent.enabled_tools) if t.status != "ok"]
+    if unusable:
+        detail = "; ".join(f"{t.name}: {t.detail}" for t in unusable)
+        checks.add("availability", "warn", f"{len(unusable)} enabled tool(s) cannot run right now", detail)
+    elif agent.enabled_tools:
+        checks.add("availability", "ok", "Every enabled tool is available")
+
+
 def _check_messaging(agent: AgentBase, others: list[AiAgent], checks: _Checks) -> None:
     if not agent.publishes:
         if "publish_message" in agent.enabled_tools:
@@ -140,8 +151,23 @@ async def _check_model(session: AsyncSession, agent: AgentBase, checks: _Checks)
         checks.add("host", "fail", f"{label} is not reachable", f"{host}: {exc}")
         return
     checks.add("host", "ok", f"{label} answers", f"{host} serves {len(models)} model(s).")
-    if model in models:
+    if not model:
+        # Switching provider does not carry a model name across (an Ollama model name means
+        # nothing to OpenRouter and vice versa) - a model left blank after that falls through to
+        # here, not to the usual "agents' default" fallback. Name the real problem rather than
+        # showing "Model  is not on the host" with a blank name.
+        checks.add("model", "fail", "No model chosen", "Type a model id or use Load models to pick one.")
+    elif model in models:
         checks.add("model", "ok", f"Model {model} is available")
+        if endpoint.provider == AssistantProvider.OPENROUTER and endpoint.credential_id is None:
+            checks.add(
+                "key",
+                "fail",
+                "No OpenRouter API key configured",
+                "Set one on this agent (Model section) or as the agents' default (AI Mode > Settings > "
+                "General), then verify again.",
+            )
+            return
         try:
             api_key = await load_api_key(get_databases(), endpoint.credential_id)
         except LLMRequestError as exc:
@@ -169,8 +195,14 @@ async def _check_latency(host: str, model: str, api_key: str | None, checks: _Ch
             max_tokens=8,
         )
     except LLMRequestError as exc:
-        detail = f"No reply within {LATENCY_TIMEOUT_SECONDS:.0f}s: {exc}"
-        checks.add("latency", "fail", "Model did not respond", detail)
+        elapsed = time.monotonic() - started
+        if elapsed >= LATENCY_TIMEOUT_SECONDS * 0.9:
+            detail = f"No reply within {LATENCY_TIMEOUT_SECONDS:.0f}s: {exc}"
+            checks.add("latency", "fail", "Model did not respond", detail)
+        else:
+            # Failed quickly - not a timeout, almost always a rejected request (bad/expired key,
+            # model the key's account can't use, provider-side error) rather than the model being slow.
+            checks.add("latency", "fail", "The model call failed", str(exc))
         return
     elapsed = time.monotonic() - started
     if elapsed > LATENCY_WARN_SECONDS:

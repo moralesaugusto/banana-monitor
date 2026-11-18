@@ -288,3 +288,53 @@ async def test_windows_and_virustotal_secrets_never_appear_in_any_api_response(
         response = await client.get(endpoint)
         assert response.status_code == 200
         assert marker not in response.text, f"secret leaked via {endpoint}"
+
+
+@pytest.mark.asyncio
+async def test_agent_credential_pool_never_leaks_a_secret(client: AsyncClient) -> None:
+    credential = (
+        await client.post(
+            "/api/credentials",
+            json={
+                "label": "pool-key",
+                "credential_type": "ssh_password",
+                "secret": {"username": "banana", "password": SECRET_MARKER},
+                "in_agent_pool": True,
+            },
+        )
+    ).json()
+    assert credential["in_agent_pool"] is True
+    assert SECRET_MARKER not in str(credential)
+
+    agent = (await client.get("/api/ai-mode/agents")).json()[0]
+    body = {**agent, "credential_scope": "selected", "credential_scope_ids": [credential["id"]]}
+    updated = await client.put(f"/api/ai-mode/agents/{agent['id']}", json=body)
+    assert updated.status_code == 200
+
+    for endpoint in ("/api/credentials", "/api/ai-mode/agents", "/api/ai-mode/settings"):
+        response = await client.get(endpoint)
+        assert response.status_code == 200
+        assert SECRET_MARKER not in response.text, endpoint
+
+
+@pytest.mark.asyncio
+async def test_credential_pool_flag_and_safeguards_round_trip(client: AsyncClient) -> None:
+    created = (
+        await client.post(
+            "/api/credentials",
+            json={"label": "k", "credential_type": "api_token", "secret": {"token": "x"}},
+        )
+    ).json()
+    assert created["in_agent_pool"] is False
+
+    patched = await client.patch(f"/api/credentials/{created['id']}", json={"in_agent_pool": True})
+    assert patched.json()["in_agent_pool"] is True
+
+    settings = (await client.get("/api/ai-mode/settings")).json()
+    assert settings["cred_allow_unlisted_hosts"] is False
+    relaxed = await client.put("/api/ai-mode/settings", json={"cred_no_attempt_limit": True})
+    assert relaxed.json()["cred_no_attempt_limit"] is True
+
+    events = (await client.get("/api/events", params={"limit": 50})).json()
+    items = events["items"] if isinstance(events, dict) else events
+    assert any(e["category"] == "ai_safeguard" and "relaxed" in e["message"] for e in items)

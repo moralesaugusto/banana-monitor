@@ -19,8 +19,21 @@ export interface AiModeSettings {
   enabled_tools: string[]
   allow_undefined_network_scan: boolean
   undefined_scan_max_hosts: number
+  allow_public_targets: boolean
+  cred_allow_unlisted_hosts: boolean
+  cred_no_attempt_limit: boolean
+  cred_trust_new_host_keys: boolean
+  cred_pool_for_updates: boolean
   ollama_max_concurrent_calls: number
   openrouter_max_concurrent_calls: number
+  memory_max_entries_per_agent: number
+  memory_max_content_chars: number
+  memory_max_inject_chars: number
+  knowledge_base_enabled: boolean
+  knowledge_embedding_base_url: string
+  knowledge_embedding_model: string
+  knowledge_embedding_credential_id: number | null
+  cost_budget_usd: number | null
 }
 
 export interface ToolInfo {
@@ -28,6 +41,25 @@ export interface ToolInfo {
   description: string
   parameters: Record<string, unknown>
   enabled: boolean
+  runs_on: 'local_program' | 'in_process' | 'lan' | 'internet' | 'target_host'
+  runs_on_label: string
+  where: string
+  safeguards: string[]
+  agents: { id: number; name: string }[]
+}
+
+export interface ToolUsage {
+  name: string
+  calls: number
+  errors: number
+  last_used: string
+  last_run_id: number
+  worked_request: unknown
+  worked_response: unknown
+  worked_run_id: number | null
+  stopped_request: unknown
+  stopped_reason: string | null
+  stopped_run_id: number | null
 }
 
 export interface AiModeTools {
@@ -35,6 +67,13 @@ export interface AiModeTools {
   tools: ToolInfo[]
   guardrails: string[]
   allowed_nmap_flags: string
+}
+
+export interface ToolAvailability {
+  name: string
+  kind: 'builtin' | 'command' | 'mcp'
+  status: 'ok' | 'missing' | 'unreachable' | 'blocked'
+  detail: string
 }
 
 export interface AiRunSummary {
@@ -55,6 +94,8 @@ export interface AiRunSummary {
   started_by?: 'manual' | 'schedule'
   stop_reason?: 'manual' | 'time_limit' | null
   entry_agent?: string
+  agents?: string[]
+  tools?: string[]
 }
 
 export interface AiRunStep {
@@ -107,6 +148,41 @@ export function useAiModeTools() {
   return useQuery({ queryKey: ['ai-mode', 'tools'], queryFn: () => api.get<AiModeTools>('/ai-mode/tools') })
 }
 
+export interface PipelineStage {
+  id: string
+  title: string
+  status: 'pass' | 'stop' | 'skip' | 'note'
+  detail: string
+}
+
+export interface ToolTrace {
+  stages: PipelineStage[]
+  would_run: boolean
+  command: string | null
+}
+
+/** Walks a hand-written call through the gates a real call passes. Runs nothing. */
+export function useTryToolCall(name: string) {
+  return useMutation({
+    mutationFn: (payload: { arguments: Record<string, unknown>; agent_id: number | null }) =>
+      api.post<ToolTrace>(`/ai-mode/tools/${name}/try`, payload),
+  })
+}
+
+export function useToolUsage() {
+  return useQuery({ queryKey: ['ai-mode', 'tools', 'usage'], queryFn: () => api.get<ToolUsage[]>('/ai-mode/tools/usage') })
+}
+
+/** Never fetched on its own: the Tools page's "Check availability" button calls `refetch`, because the
+ * check contacts MCP servers. */
+export function useToolAvailability() {
+  return useQuery({
+    queryKey: ['ai-mode', 'tools', 'availability'],
+    queryFn: () => api.get<ToolAvailability[]>('/ai-mode/tools/availability'),
+    enabled: false,
+  })
+}
+
 export function useAiRuns() {
   return useQuery({
     queryKey: ['ai-mode', 'runs'],
@@ -143,8 +219,9 @@ export interface CustomTool {
   mcp_tool: string | null
   parameters: Record<string, unknown>
   enabled: boolean
+  mcp_server_id?: number | null
 }
-export type CustomToolInput = Omit<CustomTool, 'id'>
+export type CustomToolInput = Omit<CustomTool, 'id' | 'mcp_server_id'>
 
 export interface Guardrail {
   id: number
@@ -153,6 +230,7 @@ export interface Guardrail {
   kind: 'deny_regex' | 'allow_regex'
   pattern: string
   enabled: boolean
+  applies_to: 'default' | 'all'
 }
 export type GuardrailInput = Omit<Guardrail, 'id'>
 
@@ -174,6 +252,102 @@ function useCrud<T extends { id: number }, I>(path: string, key: string) {
 }
 
 export const useCustomTools = () => useCrud<CustomTool, CustomToolInput>('/ai-mode/custom-tools', 'custom-tools')
+
+export interface ToolTestResult {
+  id: number
+  name: string
+  ok: boolean
+  detail: string
+  duration_ms: number
+  arguments_used: Record<string, unknown>
+}
+
+/** Actually calls one custom tool (against loopback) - a real end-to-end check, not a listing check. */
+export function useTestCustomTool() {
+  return useMutation({
+    mutationFn: (id: number) => api.post<ToolTestResult>(`/ai-mode/custom-tools/${id}/test`, {}),
+  })
+}
+
+/** Actually calls every enabled custom tool. Can take a while (bounded concurrency server-side). */
+export function useTestAllCustomTools() {
+  return useMutation({
+    mutationFn: () => api.post<ToolTestResult[]>('/ai-mode/custom-tools/test-all', {}),
+  })
+}
+
+// --- MCP servers: test, import every tool, refresh, delete with the tools ----------------
+
+export interface McpServer {
+  id: number
+  name: string
+  url: string
+  tool_count: number
+}
+
+export interface McpTestResult {
+  ok: boolean
+  detail: string
+  server_name: string
+  server_version: string
+  tool_count: number
+  tool_names: string[]
+  duration_ms: number
+}
+
+export interface McpImportResult {
+  added: number
+  updated: number
+  removed: number
+  unscoped: string[]
+}
+
+export const useMcpServers = () =>
+  useQuery({ queryKey: ['ai-mode', 'mcp-servers'], queryFn: () => api.get<McpServer[]>('/ai-mode/mcp-servers') })
+
+/** Everything that depends on the tool list: the tools, the servers' counts, and the enabled lists. */
+function useRefreshAfterMcpChange() {
+  const queryClient = useQueryClient()
+  return () => {
+    for (const key of ['mcp-servers', 'custom-tools', 'settings', 'agents', 'tools'])
+      queryClient.invalidateQueries({ queryKey: ['ai-mode', key] })
+  }
+}
+
+export function useSaveMcpServer() {
+  const refresh = useRefreshAfterMcpChange()
+  return useMutation({
+    mutationFn: ({ id, input }: { id?: number; input: { name: string; url: string } }) =>
+      id === undefined
+        ? api.post<McpServer>('/ai-mode/mcp-servers', input)
+        : api.put<McpServer>(`/ai-mode/mcp-servers/${id}`, input),
+    onSuccess: refresh,
+  })
+}
+
+export function useTestMcpConnection() {
+  return useMutation({
+    mutationFn: (url: string) => api.post<McpTestResult>('/ai-mode/mcp-servers/test', { url }),
+  })
+}
+
+export function useImportMcpTools() {
+  const refresh = useRefreshAfterMcpChange()
+  return useMutation({
+    mutationFn: ({ id, removeMissing }: { id: number; removeMissing: boolean }) =>
+      api.post<McpImportResult>(`/ai-mode/mcp-servers/${id}/import`, { remove_missing: removeMissing }),
+    onSuccess: refresh,
+  })
+}
+
+export function useDeleteMcpServer() {
+  const refresh = useRefreshAfterMcpChange()
+  return useMutation({
+    mutationFn: (id: number) => api.delete<{ tools_removed: number }>(`/ai-mode/mcp-servers/${id}`),
+    onSuccess: refresh,
+  })
+}
+
 export const useGuardrails = () => useCrud<Guardrail, GuardrailInput>('/ai-mode/guardrails', 'guardrails')
 
 // --- Multi-agent: agents, the message bus, human-in-the-loop ----------------------
@@ -182,6 +356,7 @@ export type ApprovalMode = 'none' | 'messages' | 'tools' | 'both'
 
 export interface Agent {
   id: number
+  memory_count?: number
   name: string
   display_name: string | null
   role: string
@@ -197,14 +372,24 @@ export interface Agent {
   enabled_tools: string[]
   mcp_url_override: string | null
   mcp_timeout_seconds: number
+  memory_max_entries_override?: number
+  memory_max_content_chars_override?: number
+  memory_max_inject_chars_override?: number
   subscribes: string[]
   publishes: string[]
   require_approval: ApprovalMode
   enabled: boolean
   allow_changes: boolean
+  credential_scope?: CredentialScope
+  credential_scope_ids?: number[]
   workflow_x?: number | null
   workflow_y?: number | null
+  fallback_provider?: AgentProvider | ''
+  fallback_base_url?: string
+  fallback_model?: string
+  fallback_credential_id?: number | null
 }
+export type CredentialScope = 'bound' | 'pool' | 'selected'
 export type AgentInput = Omit<Agent, 'id'>
 
 /** The label to show a human; `name` is the stable identifier other settings (schedule, manual run) refer to. */
@@ -213,6 +398,43 @@ export function agentLabel(agent: { name: string; display_name?: string | null }
 }
 
 export const useAgents = () => useCrud<Agent, AgentInput>('/ai-mode/agents', 'agents')
+
+export interface MemoryEntry {
+  id: number
+  content: string
+  created_at: string
+}
+
+/** An agent's saved `remember` notes: viewable and prunable by a human, see docs/ai-agents.md. */
+export function useAgentMemory(agentId: number | undefined) {
+  const queryClient = useQueryClient()
+  const path = `/ai-mode/agents/${agentId}/memory`
+  const invalidate = () => queryClient.invalidateQueries({ queryKey: ['ai-mode', 'agent-memory', agentId] })
+  return {
+    list: useQuery({
+      queryKey: ['ai-mode', 'agent-memory', agentId],
+      queryFn: () => api.get<MemoryEntry[]>(path),
+      enabled: agentId !== undefined,
+    }),
+    removeOne: useMutation({
+      mutationFn: (memoryId: number) => api.delete<void>(`${path}/${memoryId}`),
+      onSuccess: invalidate,
+    }),
+    clearAll: useMutation({ mutationFn: () => api.delete<void>(path), onSuccess: invalidate }),
+  }
+}
+
+/** Wipes every agent's saved `remember` notes at once - "clean all memory", not scoped to one agent. */
+export function useClearAllAgentMemory() {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: () => api.delete<void>('/ai-mode/memory'),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['ai-mode', 'agents'] })
+      queryClient.invalidateQueries({ queryKey: ['ai-mode', 'agent-memory'] })
+    },
+  })
+}
 
 export type VerifyStatus = 'ok' | 'info' | 'warn' | 'fail'
 export interface VerifyCheck {
@@ -231,6 +453,24 @@ export function useVerifyAgent() {
   return useMutation({
     mutationFn: ({ input, agentId }: { input: AgentInput; agentId?: number }) =>
       api.post<VerifyResult>(`/ai-mode/agents/verify${agentId === undefined ? '' : `?agent_id=${agentId}`}`, input),
+  })
+}
+
+export interface AgentConnectionTestInput {
+  provider?: string
+  base_url?: string
+  model?: string
+  credential_id?: number | null
+  api_key?: string
+  timeout_seconds?: number
+}
+
+/** Just the live-connection part of Verify (host/key/model/reply/tool-calling) - same shape and
+ * same checks as the chat assistant's and the agents' default LLM's own "Test connection". */
+export function useTestAgentConnection() {
+  return useMutation({
+    mutationFn: (input: AgentConnectionTestInput) =>
+      api.post<VerifyResult>('/ai-mode/agents/test-connection', input),
   })
 }
 
@@ -312,8 +552,10 @@ export function useRunControl() {
 /** Asks an Ollama host which models it serves; empty host means the agents' default host. */
 export function useListOllamaModels() {
   return useMutation({
-    mutationFn: (baseUrl: string) =>
-      api.get<{ base_url: string; models: string[] }>(`/ai-mode/ollama-models?base_url=${encodeURIComponent(baseUrl)}`),
+    mutationFn: ({ baseUrl, provider = '' }: { baseUrl: string; provider?: string }) =>
+      api.get<{ base_url: string; models: string[] }>(
+        `/ai-mode/ollama-models?base_url=${encodeURIComponent(baseUrl)}&provider=${encodeURIComponent(provider)}`,
+      ),
   })
 }
 

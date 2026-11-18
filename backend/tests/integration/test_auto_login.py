@@ -10,6 +10,7 @@ from sqlalchemy import select
 
 from app.db.session import get_databases
 from app.discovery.auto_login import attempt_ssh_auto_login, attempt_wallet_login
+from app.domain.bootstrap import ensure_default_site
 from app.domain.enums import DeviceType
 from app.domain.models import Device, Integration
 
@@ -397,6 +398,7 @@ async def test_wallet_credential_is_tried_against_a_non_ssh_host_and_provisions_
 
     databases = get_databases()
     async with databases.app_session_factory() as session:
+        await ensure_default_site(session)
         device = Device(
             site_id=1,
             display_name="agh",
@@ -427,6 +429,7 @@ async def test_wallet_credential_is_tried_against_a_non_ssh_host_and_provisions_
 async def test_wallet_login_is_not_retried_against_an_already_managed_device(client: AsyncClient) -> None:
     databases = get_databases()
     async with databases.app_session_factory() as session:
+        await ensure_default_site(session)
         device = Device(
             site_id=1,
             display_name="already-managed",

@@ -53,6 +53,8 @@ class PollingSupervisor:
         self._integration_tasks: dict[int, list[asyncio.Task[None]]] = {}
         self._integration_locks: dict[int, asyncio.Lock] = {}
         self._integration_generation: dict[int, int] = {}
+        self._failing_targets: dict[int, dict[str, str]] = {}
+        """integration id -> {target ref: "name: error"} for targets whose latest poll failed."""
         self._semaphore = asyncio.Semaphore(GLOBAL_CONCURRENCY_LIMIT)
         self._running = False
 
@@ -192,6 +194,7 @@ class PollingSupervisor:
     def remove_integration(self, integration_id: int) -> None:
         # Bumping the generation tells a spawn that is still awaiting its network calls to discard its result.
         self._integration_generation[integration_id] = self._integration_generation.get(integration_id, 0) + 1
+        self._failing_targets.pop(integration_id, None)
         tasks = self._integration_tasks.pop(integration_id, None)
         if tasks:
             for task in tasks:
@@ -204,6 +207,8 @@ class PollingSupervisor:
                 await self._spawn_integration(integration)
 
     async def _spawn_integration(self, integration: Integration) -> None:
+        if not integration.enabled:  # also reached by reload after a switch-off, which must stop polling
+            return
         generation = self._integration_generation.get(integration.id, 0)
         plugin = registry.get_plugin(integration.integration_type)
         if plugin is None:
@@ -323,7 +328,7 @@ class PollingSupervisor:
                 if result.learned_config:
                     await self._remember_config(integration_id, config, result.learned_config)
                 await self._persist_device(device_id, result)
-                await self._update_integration_status(integration_id, result)
+                await self._update_integration_status(integration_id, result, target)
             except Exception:  # noqa: BLE001 - one failed iteration must not end monitoring of this target
                 logger.warning(
                     "integration_poll_iteration_failed",
@@ -378,13 +383,25 @@ class PollingSupervisor:
                     device.last_seen_at = utcnow()
                 await session.commit()
 
-    async def _update_integration_status(self, integration_id: int, result: PollResult) -> None:
+    async def _update_integration_status(
+        self, integration_id: int, result: PollResult, target: TargetDescriptor | None = None
+    ) -> None:
+        """An integration is healthy only while every one of its targets is. `target` is None for a failure
+        of the integration as a whole (credential, list_targets), which has no target to remember."""
+        failing = self._failing_targets.setdefault(integration_id, {})
+        if target is not None:
+            if result.success:
+                failing.pop(target.external_ref, None)
+            else:
+                failing[target.external_ref] = f"{target.display_name}: {result.error_message}"
+        healthy = result.success and not failing
+        error = next(iter(failing.values()), None) if target is not None else result.error_message
         async with self._databases.app_session_factory() as session:
             integration = await session.get(Integration, integration_id)
             if integration is not None:
-                integration.status = IntegrationStatus.OK if result.success else IntegrationStatus.ERROR
+                integration.status = IntegrationStatus.OK if healthy else IntegrationStatus.ERROR
                 integration.last_run_at = utcnow()
-                integration.last_error = result.error_message
+                integration.last_error = None if healthy else error
                 await session.commit()
 
         await get_alert_engine().evaluate_entity(EntityType.INTEGRATION, integration_id)

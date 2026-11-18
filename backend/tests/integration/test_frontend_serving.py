@@ -34,3 +34,13 @@ async def test_page_routes_still_get_the_app(web):
 @pytest.mark.parametrize("path", ["/%2e%2e/secret.txt", "/..%2fsecret.txt", "/assets/../../secret.txt"])
 async def test_files_outside_the_build_are_never_served(web, path):
     assert "secret" not in (await web.get(path)).text
+
+
+async def test_index_page_is_served_with_no_cache_so_a_rebuilt_frontend_is_always_fetched(web):
+    response = await web.get("/")
+    assert response.headers.get("cache-control") == "no-cache"
+
+
+async def test_a_real_dist_file_is_also_served_with_no_cache(web):
+    response = await web.get("/favicon.svg")
+    assert response.headers.get("cache-control") == "no-cache"

@@ -1,12 +1,10 @@
-import { useEffect, useState } from 'react'
-import { Link, useLocation } from 'react-router-dom'
+import { useState } from 'react'
+import { Link } from 'react-router-dom'
 import {
   type DiscoverySettings,
   useDiscoverySettings,
   useScanAll,
-  useInternetAccess,
   useScanOverview,
-  useSetInternetBlocked,
   useUpdateDiscoverySettings,
 } from '../api/system'
 import { type TelegramUpdate, useTelegramConfig, useTelegramTest, useUpdateTelegramConfig } from '../api/telegram'
@@ -179,39 +177,6 @@ function ScanCard({ settings }: { settings: DiscoverySettings }) {
   )
 }
 
-function InternetKillSwitchCard() {
-  const { data } = useInternetAccess()
-  const setBlocked = useSetInternetBlocked()
-  const { hash } = useLocation()
-  const loaded = Boolean(data)
-  useEffect(() => {
-    if (loaded && hash === '#internet') document.getElementById('internet')?.scrollIntoView?.()
-  }, [loaded, hash])
-  if (!data) return null
-  return (
-    <Card id="internet" className="p-4">
-      <div className="text-sm font-medium text-fg">Agent internet kill switch</div>
-      <p className="mt-1 text-xs text-fg-muted">
-        While engaged, the web_search and fetch_url tools refuse every call from every agent, immediately,
-        including runs in progress. Only you can change it; agents have no tool that reads or writes it.
-      </p>
-      <div className="mt-3 flex items-center gap-3">
-        <button
-          type="button"
-          className={primaryButtonClasses}
-          disabled={setBlocked.isPending}
-          onClick={() => setBlocked.mutate(!data.blocked)}
-        >
-          {data.blocked ? 'Re-enable agent internet access' : 'Block all agent internet access'}
-        </button>
-        <span className="text-xs text-fg-muted">
-          {data.blocked ? 'Engaged: agents cannot reach the internet.' : 'Released: agents with web tools can search.'}
-        </span>
-      </div>
-    </Card>
-  )
-}
-
 function AiModeCard() {
   return (
     <Card className="p-4">
@@ -323,6 +288,21 @@ function TelegramCard() {
               writes it up). Off: the report is still saved on the Reports page, just not pushed here.
             </span>
           </div>
+          <div>
+            <label className="flex items-center gap-2 text-sm">
+              <input
+                type="checkbox"
+                checked={config.notify_cost_budget}
+                onChange={(e) => save({ notify_cost_budget: e.target.checked })}
+              />
+              Send a cost-budget alert to these chats
+            </label>
+            <span className="mt-1 block text-xs text-fg-muted">
+              Fires once, the first time actual OpenRouter spend crosses the budget set under AI
+              Settings &gt; General. Off: the budget warning still shows on the Cost panel, just not
+              pushed here.
+            </span>
+          </div>
           <div className="flex items-center gap-3">
             <button
               type="button"
@@ -371,7 +351,6 @@ export function SystemPage() {
           <>
             <ScanCard settings={settings} />
             <AiModeCard />
-            <InternetKillSwitchCard />
             <TelegramCard />
             <AccountCard />
           </>

@@ -1,9 +1,27 @@
 import { useState } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
-import { agentLabel, type Agent, type AgentStateName, useAgentControl, useAgents } from '../../api/aiMode'
+import {
+  agentLabel,
+  type Agent,
+  type AgentStateName,
+  useAgentControl,
+  useAgentMemory,
+  useAgents,
+  useAiModeSettings,
+} from '../../api/aiMode'
+import { useReports } from '../../api/reports'
 import { Card } from '../../components/Card'
 import { AgentRunButton, StateBadge } from './AgentStatus'
-import { APPROVAL_LABELS, buttonClasses, groupTools, isInternetTool, readersOf } from './agentFields'
+import {
+  APPROVAL_LABELS,
+  buttonClasses,
+  charsToApproxTokens,
+  effectiveProvider,
+  groupTools,
+  isInternetTool,
+  keySummary,
+  readersOf,
+} from './agentFields'
 
 function Chips({ items, empty, tone }: { items: string[]; empty: string; tone?: (item: string) => boolean }) {
   if (items.length === 0) return <span className="text-fg-subtle">{empty}</span>
@@ -41,6 +59,79 @@ function Row({ label, children }: { label: string; children: React.ReactNode }) 
   )
 }
 
+/** Notes this agent saved about itself with `remember` (docs/ai-agents.md), viewable and prunable here. */
+function MemoryCard({ agent }: { agent: Agent }) {
+  const { list, removeOne, clearAll } = useAgentMemory(agent.id)
+  const entries = list.data ?? []
+
+  return (
+    <Card className="p-4" id="agent-memory">
+      <div className="flex items-center justify-between">
+        <h2 className="text-xs font-semibold uppercase tracking-wide text-fg-muted">
+          Memory {entries.length > 0 && `(${entries.length})`}
+        </h2>
+        {entries.length > 0 && (
+          <button
+            type="button"
+            className="text-xs font-medium text-red-600 hover:underline"
+            onClick={() => window.confirm(`Clear all ${entries.length} saved notes for ${agent.name}?`) && clearAll.mutate()}
+          >
+            Clear all
+          </button>
+        )}
+      </div>
+      {entries.length === 0 ? (
+        <p className="mt-3 text-sm text-fg-muted">
+          No notes saved yet. {agent.enabled_tools.includes('remember') ? '' : 'Tick "remember" on the tools list to let this agent save notes for its future runs.'}
+        </p>
+      ) : (
+        <ul className="mt-3 max-h-72 space-y-2 overflow-auto">
+          {entries.map((entry) => (
+            <li key={entry.id} className="flex items-start justify-between gap-3 rounded-control bg-canvas p-2 text-sm">
+              <div className="min-w-0">
+                <p className="break-words">{entry.content}</p>
+                <p className="mt-1 text-xs text-fg-subtle">{new Date(entry.created_at).toLocaleString()}</p>
+              </div>
+              <button
+                type="button"
+                className="shrink-0 text-xs text-red-600 hover:underline"
+                onClick={() => removeOne.mutate(entry.id)}
+              >
+                Delete
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
+    </Card>
+  )
+}
+
+/** This agent's own saved reports (save_report tool), newest first - the Reports page shows every
+    agent's reports together, so this is the quick "did it actually write one" view on the agent itself. */
+function ReportsCard({ agent }: { agent: Agent }) {
+  const { data: reports } = useReports()
+  const mine = (reports ?? []).filter((r) => r.source === `agent:${agent.name}`)
+  if (mine.length === 0) return null
+  return (
+    <Card className="p-4">
+      <h2 className="text-xs font-semibold uppercase tracking-wide text-fg-muted">
+        Reports ({mine.length})
+      </h2>
+      <ul className="mt-3 space-y-2">
+        {mine.map((r) => (
+          <li key={r.id} className="flex items-center justify-between gap-3 text-sm">
+            <Link to={`/reports?report=${r.id}`} className="min-w-0 truncate text-accent-strong hover:underline">
+              {r.title}
+            </Link>
+            <span className="shrink-0 text-xs text-fg-subtle">{new Date(r.created_at).toLocaleString()}</span>
+          </li>
+        ))}
+      </ul>
+    </Card>
+  )
+}
+
 /** Every setting of one agent, read-only, in labelled sections. Editing happens on its own screen. */
 export function AgentDetail({
   agent,
@@ -61,6 +152,7 @@ export function AgentDetail({
   const { remove } = useAgents()
   const navigate = useNavigate()
   const readers = readersOf(agent, all)
+  const { data: defaults } = useAiModeSettings()
   const [targetInput, setTargetInput] = useState('')
   const [messageInput, setMessageInput] = useState('')
   const targets = targetInput.split(',').map((t) => t.trim()).filter(Boolean)
@@ -73,6 +165,15 @@ export function AgentDetail({
             <div className="flex items-center gap-3">
               <h2 className="text-lg font-semibold" title={agent.name}>{agentLabel(agent)}</h2>
               <StateBadge state={state ?? (agent.enabled ? 'stopped' : 'disabled')} queued={queued} />
+              {!!agent.memory_count && (
+                <a
+                  href="#agent-memory"
+                  title={`${agent.memory_count} saved memory note(s) - jump to Memory`}
+                  className="rounded-full bg-accent-soft-strong px-2 py-0.5 text-xs font-semibold text-accent-strong hover:underline"
+                >
+                  {agent.memory_count} memory note{agent.memory_count === 1 ? '' : 's'}
+                </a>
+              )}
             </div>
             <p className="mt-1 text-sm text-fg-muted">{agent.role || 'No role description.'}</p>
           </div>
@@ -130,7 +231,18 @@ export function AgentDetail({
 
       <div className="grid gap-4 xl:grid-cols-2">
         <Section title="Model">
-          <Row label="Ollama host">
+          <Row label="Provider">
+            {(() => {
+              const key = keySummary(agent, defaults)
+              return (
+                <span className={key.warn ? 'font-medium text-amber-700 dark:text-amber-300' : undefined}>
+                  {key.text}
+                  {!agent.provider && ' (agents\' default)'}
+                </span>
+              )
+            })()}
+          </Row>
+          <Row label={effectiveProvider(agent, defaults) === 'openrouter' ? 'API base URL' : 'Ollama host'}>
             <span className="break-all font-mono text-xs">{agent.base_url || 'agents default'}</span>
           </Row>
           <Row label="Model">
@@ -138,6 +250,24 @@ export function AgentDetail({
           </Row>
           <Row label="Temperature">{agent.temperature}</Row>
           <Row label="Loop limit">up to {agent.max_iterations} model calls per message</Row>
+          <Row label="Remember">
+            {agent.enabled_tools.includes('remember') ? (
+              <>
+                On - up to {agent.memory_max_entries_override || defaults?.memory_max_entries_per_agent || 30}{' '}
+                notes, ~
+                {charsToApproxTokens(
+                  agent.memory_max_content_chars_override || defaults?.memory_max_content_chars || 200,
+                )}{' '}
+                tokens each, ~
+                {charsToApproxTokens(
+                  agent.memory_max_inject_chars_override || defaults?.memory_max_inject_chars || 4000,
+                )}{' '}
+                tokens injected per call
+              </>
+            ) : (
+              <span className="text-fg-subtle">Off</span>
+            )}
+          </Row>
         </Section>
 
         <Section title="Safety">
@@ -145,22 +275,34 @@ export function AgentDetail({
           <Row label="Changes">
             {agent.allow_changes ? 'May change hosts; every change needs your approval' : 'Read-only'}
           </Row>
+          <Row label="Stored credentials">
+            {agent.credential_scope === 'pool'
+              ? 'Host-bound integration first, then the credential pool'
+              : agent.credential_scope === 'selected'
+                ? `Host-bound integration first, then ${agent.credential_scope_ids?.length ?? 0} selected credential(s)`
+                : 'Host-bound integrations only'}
+          </Row>
           <Row label="Enabled">{agent.enabled ? 'Takes part in new runs' : 'Switched off'}</Row>
         </Section>
       </div>
 
       <Section title="Tools">
-        {agent.enabled_tools.length === 0 ? (
-          <Row label="Tools">
-            <span className="text-fg-subtle">none</span>
-          </Row>
-        ) : (
-          groupTools(agent.enabled_tools).map((group) => (
-            <Row key={group.id} label={group.label}>
-              <Chips items={group.tools} empty="none" tone={group.id === 'internet' ? isInternetTool : undefined} />
+        {/* 'remember' has its own row under Model (above) - exclude it here so it isn't also
+            listed as an uncategorized "custom" tool. */}
+        {(() => {
+          const shownTools = agent.enabled_tools.filter((t) => t !== 'remember')
+          return shownTools.length === 0 ? (
+            <Row label="Tools">
+              <span className="text-fg-subtle">none</span>
             </Row>
-          ))
-        )}
+          ) : (
+            groupTools(shownTools).map((group) => (
+              <Row key={group.id} label={group.label}>
+                <Chips items={group.tools} empty="none" tone={group.id === 'internet' ? isInternetTool : undefined} />
+              </Row>
+            ))
+          )
+        })()}
         {agent.mcp_url_override && (
           <Row label="MCP server override">
             <span className="break-all font-mono text-xs">{agent.mcp_url_override}</span>
@@ -182,6 +324,10 @@ export function AgentDetail({
           <Chips items={readers} empty={`nobody listens to result.${agent.name}`} />
         </Row>
       </Section>
+
+      <ReportsCard agent={agent} />
+
+      <MemoryCard agent={agent} />
 
       <Card className="p-4">
         <h2 className="text-xs font-semibold uppercase tracking-wide text-fg-muted">System prompt</h2>

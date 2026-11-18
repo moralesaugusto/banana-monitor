@@ -97,6 +97,15 @@ async def scan_network(databases: Databases, network_id: int) -> None:
         _scanning_networks.discard(network_id)
 
 
+def host_count(net: ipaddress.IPv4Network | ipaddress.IPv6Network) -> int:
+    """How many addresses `net.hosts()` would yield, from the prefix alone. Range limits must use this:
+    enumerating the hosts to count them allocates 2**64 entries for an IPv6 /64 before any limit applies."""
+    if isinstance(net, ipaddress.IPv6Network):
+        # hosts() skips only the subnet-router anycast address, and nothing for point-to-point /127 and /128
+        return net.num_addresses if net.prefixlen >= 127 else net.num_addresses - 1
+    return net.num_addresses if net.prefixlen >= 31 else net.num_addresses - 2
+
+
 async def scan_cidr(
     databases: Databases, cidr: str, *, network_id: int | None = None, max_hosts: int = MAX_HOSTS_PER_SCAN
 ) -> dict[str, object]:
@@ -111,9 +120,10 @@ async def scan_cidr(
     caller-side claim like `scan_network`'s `_scanning_networks` to rely on.
     """
     net = ipaddress.ip_network(cidr, strict=False)
+    count = host_count(net)
+    if count > max_hosts:
+        raise ValueError(f"{cidr} has {count} hosts, more than the {max_hosts} limit")
     hosts = list(net.hosts())
-    if len(hosts) > max_hosts:
-        raise ValueError(f"{cidr} has {len(hosts)} hosts, more than the {max_hosts} limit")
 
     if network_id is None:
         if cidr in _scanning_cidrs:

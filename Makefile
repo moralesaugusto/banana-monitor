@@ -1,14 +1,14 @@
 .PHONY: run dev dev-backend dev-backend-http dev-backend-https dev-frontend build test lint check migrate venv
 
 # Address the dev servers bind to. Override with `make dev-backend BIND_HOST=0.0.0.0` to reach it from the LAN
-# (the dashboard has a login, but see docs/security-review.md before exposing it).
+# (the dashboard has a login, but think before exposing it).
 BIND_HOST ?= 127.0.0.1
 
 venv:
 	cd backend && uv sync --extra dev
 
 # One-command way to run the app from the repo root with uv. There is no
-# root-level Python project (binding decision, see CLAUDE.md/docs/architecture.md)
+# root-level Python project (a deliberate choice)
 # so this is a thin `cd` wrapper around the same `uv run banana` entrypoint
 # make dev-backend-https/deploy/banana.service use - not a separate codepath.
 # Serves the prebuilt frontend/dist too; run `make build` first if it's stale.
@@ -52,4 +52,4 @@ lint: frontend/node_modules
 check: lint test
 
 migrate:
-	cd backend && for db in app metrics credentials; do uv run alembic -c alembic_$$db.ini upgrade head; done
+	cd backend && for db in app metrics credentials knowledge; do uv run alembic -c alembic_$$db.ini upgrade head; done

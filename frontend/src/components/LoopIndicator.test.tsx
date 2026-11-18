@@ -55,7 +55,7 @@ describe('top bar internet indicator', () => {
   it('links to the kill switch in settings while an agent has web tools', async () => {
     server.use(access(false, ['researcher']))
     renderBar()
-    expect(await screen.findByRole('link', { name: 'Agent internet access is on' })).toHaveAttribute('href', '/system#internet')
+    expect(await screen.findByRole('link', { name: 'Agent internet access is on' })).toHaveAttribute('href', '/ai/config#internet')
   })
 
   it('shows the blocked state', async () => {

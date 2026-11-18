@@ -129,4 +129,35 @@ describe('SystemPage', () => {
 
     await waitFor(() => expect(body).toMatchObject({ notify_ai_reports: false }))
   })
+
+  it('turns off the Telegram cost-budget alert', async () => {
+    let body: Record<string, unknown> = {}
+    server.use(
+      http.get('/api/telegram/config', () =>
+        HttpResponse.json({
+          enabled: true, token_set: true, chat_ids: [42], notify_alerts: true, notify_ai_reports: true, notify_cost_budget: true,
+        }),
+      ),
+      http.put('/api/telegram/config', async ({ request }) => {
+        body = (await request.json()) as Record<string, unknown>
+        return HttpResponse.json({
+          enabled: true, token_set: true, chat_ids: [42], notify_alerts: true, notify_ai_reports: true, notify_cost_budget: false,
+        })
+      }),
+    )
+    render(
+      <QueryClientProvider client={queryClient}>
+        <MemoryRouter>
+          <SystemPage />
+        </MemoryRouter>
+      </QueryClientProvider>,
+    )
+    const toggle = await screen.findByRole('checkbox', {
+      name: 'Send a cost-budget alert to these chats',
+    })
+    expect(toggle).toBeChecked()
+    await userEvent.click(toggle)
+
+    await waitFor(() => expect(body).toMatchObject({ notify_cost_budget: false }))
+  })
 })

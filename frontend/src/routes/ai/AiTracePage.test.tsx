@@ -1,5 +1,6 @@
 import { QueryClientProvider } from '@tanstack/react-query'
-import { render, screen } from '@testing-library/react'
+import { render, screen, within } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
 import { http, HttpResponse } from 'msw'
 import { MemoryRouter, Route, Routes } from 'react-router-dom'
 import { beforeEach, describe, expect, it } from 'vitest'
@@ -79,5 +80,84 @@ describe('AiTracePage', () => {
     )
 
     expect(await screen.findByText(/3 failed run_nc calls in a row/)).toBeInTheDocument()
+  })
+
+  it('shows why a tool call was stopped and links each tool step to its card', async () => {
+    server.use(
+      http.get('/api/ai-mode/runs/4', () =>
+        HttpResponse.json({
+          id: 4, started_at: '2026-10-08T00:00:00Z', finished_at: '2026-10-08T00:00:20Z', status: 'done',
+          targets: [], dry_run: false, model: 'qwen', prompt_tokens: 0, completion_tokens: 0,
+          summary: null, error: null, step_count: 1, services_recorded: 0, base_url: 'http://x/v1',
+          system_prompt: 'p', settings_snapshot: {},
+          steps: [
+            { idx: 0, ts: '2026-10-08T00:00:02Z', kind: 'tool', name: 'run_nmap', request: { target: '8.8.8.8' },
+              response: { error: '8.8.8.8 is not inside any configured network' }, duration_ms: 3,
+              prompt_tokens: 0, completion_tokens: 0 },
+          ],
+        }),
+      ),
+    )
+    render(
+      <QueryClientProvider client={queryClient}>
+        <MemoryRouter initialEntries={['/ai/runs/4']}>
+          <Routes>
+            <Route path="/ai/runs/:id" element={<AiTracePage />} />
+          </Routes>
+        </MemoryRouter>
+      </QueryClientProvider>,
+    )
+
+    expect(await screen.findByText('Stopped by: 8.8.8.8 is not inside any configured network')).toBeInTheDocument()
+    expect(screen.getByRole('link', { name: /How run_nmap works/ })).toHaveAttribute('href', '/ai/tools#run_nmap')
+  })
+
+  it('filters the trace by agent, tool and errors on the right-hand panel', async () => {
+    server.use(
+      http.get('/api/ai-mode/runs/5', () =>
+        HttpResponse.json({
+          id: 5, started_at: '2026-10-08T00:00:00Z', finished_at: '2026-10-08T00:00:20Z', status: 'done',
+          targets: [], dry_run: false, model: 'qwen', prompt_tokens: 0, completion_tokens: 0,
+          summary: 'Done.', error: null, step_count: 3, services_recorded: 0, base_url: 'http://x/v1',
+          system_prompt: 'p', settings_snapshot: {},
+          steps: [
+            { idx: 0, ts: '2026-10-08T00:00:01Z', kind: 'tool', name: 'run_nmap', agent: 'discoverer',
+              request: {}, response: { exit_code: 0 }, duration_ms: 1, prompt_tokens: 0, completion_tokens: 0 },
+            { idx: 1, ts: '2026-10-08T00:00:02Z', kind: 'tool', name: 'run_nc', agent: 'reviewer',
+              request: {}, response: { error: 'timed out' }, duration_ms: 1, prompt_tokens: 0, completion_tokens: 0 },
+            { idx: 2, ts: '2026-10-08T00:00:03Z', kind: 'llm', name: 'qwen', agent: 'reviewer', request: [],
+              response: { content: 'ok', tool_calls: [] }, duration_ms: 1, prompt_tokens: 0, completion_tokens: 0 },
+          ],
+        }),
+      ),
+    )
+    render(
+      <QueryClientProvider client={queryClient}>
+        <MemoryRouter initialEntries={['/ai/runs/5']}>
+          <Routes>
+            <Route path="/ai/runs/:id" element={<AiTracePage />} />
+          </Routes>
+        </MemoryRouter>
+      </QueryClientProvider>,
+    )
+
+    expect(await screen.findByText('1. Tool')).toBeInTheDocument()
+    expect(screen.getByText('2. Tool')).toBeInTheDocument()
+    expect(screen.getByText('3. Model')).toBeInTheDocument()
+
+    await userEvent.click(within(screen.getByRole('region', { name: 'Agents' })).getByLabelText(/^reviewer/))
+
+    expect(screen.queryByText('1. Tool')).not.toBeInTheDocument()
+    expect(screen.getByText('2. Tool')).toBeInTheDocument()
+    expect(screen.getByText('3. Model')).toBeInTheDocument()
+    // the final summary stays visible regardless of what's filtered out of the step list
+    expect(screen.getByText('Done.')).toBeInTheDocument()
+
+    await userEvent.click(screen.getByLabelText(/^Errors only/))
+    expect(screen.queryByText('3. Model')).not.toBeInTheDocument()
+    expect(screen.getByText('2. Tool')).toBeInTheDocument()
+
+    await userEvent.click(screen.getByRole('button', { name: 'Clear all' }))
+    expect(screen.getByText('1. Tool')).toBeInTheDocument()
   })
 })

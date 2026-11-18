@@ -26,14 +26,14 @@ It does nothing unless you enable AI Mode in Settings, point its tool server at 
 - **Metrics:** history with automatic rollups and a size-bounded retention policy.
 - **AI Mode:** a small team of local-LLM agents (Ollama) that discover and double-check services, inspect hosts for health, update and security problems (Bellaco, Sinverguenza), with human approval gates and full run traces. One agent, Tajonaso, is different from the rest - see the warning below.
 - **Transparent agent bus:** agents run concurrently, one `asyncio` task each, and only talk through a pub/sub message bus (dot-separated topics, `*`/`#` wildcard subscriptions) - never by calling each other directly. The UI shows the live routing table, per-topic message log, queue depth and per-agent state, and a workflow canvas of who publishes to whom, so a multi-agent run stays inspectable rather than a black box.
-- **Reports:** network and services reports, built without a model or written by a reporter agent, downloadable as PDF.
+- **Reports:** one report per network when an AI run ends (every host, with OS, patches, findings and changes), plus on-demand snapshots; written in Markdown and downloadable as Markdown or PDF.
 - **Telegram:** talk to the assistant, get `/status` and PDF reports, and receive alerts in a chat.
 - **Self-monitoring:** the platform watches its own health.
 - **Credentials:** stored encrypted in a separate database, never returned by the API.
 
 ### The default agents
 
-A fresh install seeds five agents (AI Mode > Agents), each with its own prompt, tools and approval setting - see [Tajonaso](#tajonaso) above for the sixth.
+A fresh install seeds five agents (AI Mode > Agents), each with its own model, prompt, tools and approval setting. You can choose a cheap model for discovery and a more capable, more expensive one for investigation, reasoning and code execution - see [Tajonaso](#tajonaso) above for the sixth.
 
 | Agent | Job | Changes hosts? |
 |---|---|---|
@@ -41,7 +41,7 @@ A fresh install seeds five agents (AI Mode > Agents), each with its own prompt, 
 | `reviewer` | Identifies and records the services behind open ports; hands a finding off to `sinverguenza` when something looks inconsistent | Never |
 | `bellaco` | OS/hardware details, patch level, performance, failed services, full disks, pending reboots; recommendations per host | Only through `apply_updates`, and only after you approve each call |
 | `sinverguenza` | Security incidents and forensics: unauthorized access, malicious files, suspicious or persistent processes, tampered accounts or SSH keys, a cleared trail - builds a timeline and checks anything suspicious with VirusTotal if that tool is enabled | Never |
-| `reporter` | Turns `bellaco`'s and `sinverguenza`'s findings into a network/services report | Never |
+| `reporter` | Writes the analysis for the report the platform builds per network when a run ends (every host, with OS, patches, vulnerabilities and what changed) | Never |
 
 They only talk through the pub/sub bus (see above), not by calling each other directly, and every agent can be run, edited or disabled on its own from the Agents page.
 

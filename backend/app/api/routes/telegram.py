@@ -18,6 +18,7 @@ class TelegramConfigRead(BaseModel):
     chat_ids: list[int]
     notify_alerts: bool
     notify_ai_reports: bool
+    notify_cost_budget: bool
 
 
 class TelegramConfigUpdate(BaseModel):
@@ -27,6 +28,7 @@ class TelegramConfigUpdate(BaseModel):
     chat_ids: list[int] | None = None
     notify_alerts: bool | None = None
     notify_ai_reports: bool | None = None
+    notify_cost_budget: bool | None = None
 
 
 def _read(config: TelegramConfig) -> TelegramConfigRead:
@@ -36,6 +38,7 @@ def _read(config: TelegramConfig) -> TelegramConfigRead:
         chat_ids=list(config.chat_ids),
         notify_alerts=config.notify_alerts,
         notify_ai_reports=config.notify_ai_reports,
+        notify_cost_budget=config.notify_cost_budget,
     )
 
 
@@ -71,6 +74,8 @@ async def update_config(
         config.notify_alerts = payload.notify_alerts
     if payload.notify_ai_reports is not None:
         config.notify_ai_reports = payload.notify_ai_reports
+    if payload.notify_cost_budget is not None:
+        config.notify_cost_budget = payload.notify_cost_budget
     if payload.enabled is not None:
         if payload.enabled and config.credential_id is None:
             raise HTTPException(status_code=400, detail="Set a bot token before enabling Telegram")

@@ -105,7 +105,14 @@ async def check_connection(
     model: str,
     api_key: str | None,
     timeout: float = REPLY_TIMEOUT_SECONDS,
+    *,
+    for_chat_assistant: bool = True,
 ) -> VerifyResult:
+    """`for_chat_assistant=True` (the chat panel's own connection) appends a note that AI Mode
+    agents are a separate connection, on Ollama by default. Callers testing an agents' own
+    connection (the agents' default LLM, or one specific agent) pass `for_chat_assistant=False` -
+    that note would be actively wrong there: the whole point of that test is confirming what
+    agents actually use, which may well be OpenRouter."""
     checks: list[VerifyCheck] = []
     key = api_key if provider == AssistantProvider.OPENROUTER else None
 
@@ -140,7 +147,7 @@ async def check_connection(
     if all(c.status != "fail" for c in checks):
         checks.append(await _check_reply(base_url, key, model, timeout))
         checks.append(await _check_tools(base_url, key, model, timeout))
-    if provider == AssistantProvider.OPENROUTER:
+    if provider == AssistantProvider.OPENROUTER and for_chat_assistant:
         checks.append(
             VerifyCheck(
                 id="agents",

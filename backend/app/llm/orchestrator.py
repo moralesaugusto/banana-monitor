@@ -27,20 +27,22 @@ from sqlalchemy import select
 from app.background import spawn
 from app.db.session import Databases
 from app.domain.enums import EventSeverity
-from app.domain.models import AiCustomTool, AiGuardrail, AiMessage, AiRun, Event, utcnow
+from app.domain.models import AiAgentMemory, AiCustomTool, AiGuardrail, AiMessage, AiRun, Event, utcnow
 from app.llm.agent import DEFAULT_SYSTEM_PROMPT, Recorder, _active, _clip
-from app.llm.agent_tools import dispatch, schemas_for
+from app.llm.agent_tools import dispatch, effective_memory_limits, schemas_for
 from app.llm.agent_tools import save_report as _save_report_tool
 from app.llm.bus import APPROVAL_PREFIX, BusError, Envelope, MessageBus, get_message_bus, topic_matches
 from app.llm.client import LLMRequestError, call_chat_completions
 from app.llm.custom_tools import check_guardrails, run_custom_tool, string_values
 from app.llm.custom_tools import schema_for as custom_schema_for
-from app.llm.inspect_tools import INSPECT_TOOL_NAMES, MUTATING_TOOLS
+from app.llm.guardrail_scope import guardrails_for
+from app.llm.inspect_tools import MUTATING_TOOLS
 from app.llm.provider import load_api_key
 from app.llm.tool_base import AgentToolError
 from app.llm.usage import record_usage
 from app.logging_setup import get_logger
 from app.reports.builder import build_snapshot, snapshot_markdown
+from app.reports.run_report import collect_scopes, run_digest, save_run_reports
 
 logger = get_logger(__name__)
 
@@ -80,6 +82,11 @@ class AgentCfg:
     credential_id: int | None = None
     """OpenRouter API key reference; the key is read from the credential store for each call."""
     provider: str = "ollama"
+    fallback_provider: str = ""
+    """'' = no fallback configured. If the primary model call fails, it is retried once here."""
+    fallback_base_url: str = ""
+    fallback_model: str = ""
+    fallback_credential_id: int | None = None
 
 
 @dataclass
@@ -107,6 +114,12 @@ class RunContext:
     summaries: dict[str, str] = field(default_factory=dict)
     errors: list[str] = field(default_factory=list)
     recorded: int = 0
+    entry_agent: str = ""
+    capture_narrative: bool = False
+    """True while the reporter writes its run-end summary: its save_report then fills `narrative`
+    instead of saving a report of its own, because the run's per-network reports are assembled from
+    the database and only carry the narrative on top."""
+    narrative: str | None = None
     stopped: bool = False
     stop_reason: str | None = None
     """manual | time_limit"""
@@ -286,6 +299,43 @@ def _team_context(cfg: AgentCfg, agents: dict[str, AgentCfg]) -> str:
     return "\n".join(line for line in lines if line)
 
 
+async def _memory_context(databases: Databases, agent_name: str) -> str:
+    """Injects this agent's most recent `remember` notes into its system prompt, newest first,
+    up to its effective total-character budget (memory_max_inject_chars, default or override -
+    see effective_memory_limits) rather than a fixed note count: this is what actually bounds
+    the context-window cost of memory per call. The single most recent note is always included,
+    truncated to the budget if it alone exceeds it, so a tight budget still carries the latest
+    fact instead of silently injecting nothing."""
+    async with databases.app_session_factory() as session:
+        _, _, max_inject_chars = await effective_memory_limits(session, agent_name)
+        rows = (
+            (
+                await session.execute(
+                    select(AiAgentMemory.content)
+                    .where(AiAgentMemory.agent_name == agent_name)
+                    .order_by(AiAgentMemory.created_at.desc(), AiAgentMemory.id.desc())
+                )
+            )
+            .scalars()
+            .all()
+        )
+    if not rows:
+        return ""
+    selected: list[str] = []
+    total = 0
+    for content in rows:
+        if not selected:
+            selected.append(content[:max_inject_chars])
+            total = len(selected[0])
+            continue
+        if total + len(content) > max_inject_chars:
+            break
+        selected.append(content)
+        total += len(content)
+    notes = "\n".join(f"- {note}" for note in selected)
+    return f"\n\nNotes you saved for yourself in earlier runs:\n{notes}"
+
+
 async def _publish(
     ctx: RunContext, cfg: AgentCfg, env: Envelope, topic: str, payload: dict[str, Any]
 ) -> dict[str, Any]:
@@ -359,8 +409,9 @@ async def _run_tool(
         asks_human = cfg.require_approval in ("tools", "both") or name in MUTATING_TOOLS
         if asks_human and name != "publish_message":
             arguments = await _ask_human_about_tool(ctx, cfg, env, name, arguments)
-        if name in INSPECT_TOOL_NAMES:
-            check_guardrails(ctx.guardrails, string_values(arguments))
+        if name not in ctx.custom_tools:  # a custom tool checks its own inside run_custom_tool
+            rules = guardrails_for(name, ctx.guardrails, custom_tool=False)
+            check_guardrails(rules, string_values(arguments))
         if name == "publish_message":
             result: Any = await _publish(
                 ctx, cfg, env, str(arguments.get("topic", "")), {"text": str(arguments.get("content", ""))}
@@ -374,9 +425,18 @@ async def _run_tool(
                 cfg.mcp_url_override,
                 cfg.mcp_timeout_seconds,
             )
+        elif name == "save_report" and ctx.capture_narrative:
+            ctx.narrative = str(arguments.get("content") or "").strip() or None
+            result = {"saved": True, "note": "this becomes the analysis section of the run's reports"}
         else:
             result = await dispatch(
-                ctx.databases, name, arguments, enabled=cfg.enabled_tools, dry_run=ctx.dry_run
+                ctx.databases,
+                name,
+                arguments,
+                enabled=cfg.enabled_tools,
+                dry_run=ctx.dry_run,
+                agent_name=cfg.name,
+                run_id=ctx.run_id,
             )
         if name == "record_service" and (result.get("recorded") or result.get("dry_run")):
             ctx.recorded += 1 if result.get("recorded") else 0
@@ -474,10 +534,13 @@ async def _handle(ctx: RunContext, cfg: AgentCfg, env: Envelope) -> None:
     """One bounded tool-calling loop in response to one message."""
     tools = {t["function"]["name"]: t for t in schemas_for(cfg.enabled_tools)}
     tools.update({n: custom_schema_for(t) for n, t in ctx.custom_tools.items() if n in cfg.enabled_tools})
+    memory = await _memory_context(ctx.databases, cfg.name) if "remember" in cfg.enabled_tools else ""
     messages: list[dict[str, Any]] = [
         {
             "role": "system",
-            "content": (cfg.system_prompt or DEFAULT_SYSTEM_PROMPT) + _team_context(cfg, ctx.agents),
+            "content": (cfg.system_prompt or DEFAULT_SYSTEM_PROMPT)
+            + _team_context(cfg, ctx.agents)
+            + memory,
         },
         {"role": "user", "content": _message_text(env)},
     ]
@@ -486,18 +549,48 @@ async def _handle(ctx: RunContext, cfg: AgentCfg, env: Envelope) -> None:
     for _ in range(cfg.max_iterations):
         await ctx.running.wait()
         started = time.monotonic()
-        api_key = await load_api_key(ctx.databases, cfg.credential_id)
         ctx.set_state(cfg.name, "llm")
-        async with ctx.provider_gate(cfg.provider):
-            response = await call_chat_completions(
-                base_url=cfg.base_url,
-                api_key=api_key,
-                model=cfg.model,
-                messages=messages,
-                tools=list(tools.values()),
-                timeout=cfg.llm_timeout_seconds or ctx.llm_timeout_seconds,
-                temperature=cfg.temperature,
+        provider_used, base_url_used, model_used, credential_used = (
+            cfg.provider,
+            cfg.base_url,
+            cfg.model,
+            cfg.credential_id,
+        )
+        try:
+            api_key = await load_api_key(ctx.databases, credential_used)
+            async with ctx.provider_gate(provider_used):
+                response = await call_chat_completions(
+                    base_url=base_url_used,
+                    api_key=api_key,
+                    model=model_used,
+                    messages=messages,
+                    tools=list(tools.values()),
+                    timeout=cfg.llm_timeout_seconds or ctx.llm_timeout_seconds,
+                    temperature=cfg.temperature,
+                )
+        except LLMRequestError:
+            if not cfg.fallback_provider:
+                raise
+            logger.warning(
+                "ai_model_fallback", agent=cfg.name, primary=model_used, fallback=cfg.fallback_model
             )
+            provider_used, base_url_used, model_used, credential_used = (
+                cfg.fallback_provider,
+                cfg.fallback_base_url,
+                cfg.fallback_model,
+                cfg.fallback_credential_id,
+            )
+            api_key = await load_api_key(ctx.databases, credential_used)
+            async with ctx.provider_gate(provider_used):
+                response = await call_chat_completions(
+                    base_url=base_url_used,
+                    api_key=api_key,
+                    model=model_used,
+                    messages=messages,
+                    tools=list(tools.values()),
+                    timeout=cfg.llm_timeout_seconds or ctx.llm_timeout_seconds,
+                    temperature=cfg.temperature,
+                )
         message = response["choices"][0]["message"]
         usage = response.get("usage") or {}
         requested = message.get("tool_calls") or []
@@ -505,7 +598,7 @@ async def _handle(ctx: RunContext, cfg: AgentCfg, env: Envelope) -> None:
         completion_tokens = int(usage.get("completion_tokens") or 0)
         await ctx.recorder.step(
             kind="llm",
-            name=cfg.model,
+            name=model_used,
             agent=cfg.name,
             request=_clip(messages),
             response=_clip(
@@ -527,8 +620,8 @@ async def _handle(ctx: RunContext, cfg: AgentCfg, env: Envelope) -> None:
             ctx.databases,
             source="agent",
             agent=cfg.name,
-            provider=cfg.provider,
-            model=cfg.model,
+            provider=provider_used,
+            model=model_used,
             prompt_tokens=prompt_tokens,
             completion_tokens=completion_tokens,
         )
@@ -611,9 +704,43 @@ async def _reporter_fallback_report(ctx: RunContext, error: str) -> None:
             "whatever triggered this run.\n\n" + snapshot_markdown(snapshot)
         )
         title = "Reporter fallback (analysis failed)"
-        await _save_report_tool(ctx.databases, {"title": title, "content": content})
+        await _save_report_tool(ctx.databases, {"title": title, "content": content}, agent_name="reporter")
     except Exception:  # noqa: BLE001 - a failed fallback must not raise past an already-failed agent
         logger.warning("ai_reporter_fallback_failed", exc_info=True)
+
+
+def _is_folded_into_run_report(ctx: RunContext, cfg: AgentCfg, env: Envelope) -> bool:
+    """When another agent started the run, the reporter does not write a report per result message: the
+    run's reports are assembled once, per network, when the run ends. A run the reporter was asked to
+    start itself (the Reports page) still gets its own report."""
+    return cfg.name == "reporter" and ctx.entry_agent != "reporter" and env.topic.startswith("result.")
+
+
+async def _write_run_reports(ctx: RunContext) -> None:
+    """Asks the reporter for a short narrative (if it is in the run and enabled), then saves the per-network
+    reports. Never raises: a failure here must not turn a finished run into an error."""
+    try:
+        scopes = await collect_scopes(ctx.databases, ctx.run_id)
+        if not scopes:
+            return
+        notes = [f"Agent error: {e}" for e in ctx.errors[:5]]
+        if ctx.stop_reason:
+            notes.append("The run was stopped before it finished, so some hosts may be incomplete.")
+        reporter = ctx.agents.get("reporter")
+        if reporter is not None and not ctx.stop_reason:
+            ctx.capture_narrative = True
+            await ctx.bus.publish(
+                ctx.run_id, "task.reporter", "human", {"text": run_digest(scopes, ctx.summaries)},
+                reply_to="result.reporter",
+            )
+            remaining = max(30.0, (ctx.deadline - utcnow()).total_seconds())
+            try:
+                await asyncio.wait_for(ctx.bus.wait_idle(ctx.run_id), remaining)
+            except TimeoutError:
+                notes.append("The reporter did not finish its summary in time; the tables are complete.")
+        await save_run_reports(ctx.databases, ctx.run_id, scopes, ctx.narrative, notes)
+    except Exception:  # noqa: BLE001 - reports are a by-product; the run itself already succeeded or failed
+        logger.warning("ai_run_reports_failed", run_id=ctx.run_id, exc_info=True)
 
 
 async def _agent_loop(ctx: RunContext, cfg: AgentCfg, queue: "asyncio.Queue[Envelope]") -> None:
@@ -623,6 +750,8 @@ async def _agent_loop(ctx: RunContext, cfg: AgentCfg, queue: "asyncio.Queue[Enve
         try:
             await ctx.running.wait()
             ctx.set_state(cfg.name, "working")
+            if _is_folded_into_run_report(ctx, cfg, env):
+                continue
             await _handle(ctx, cfg, env)
         except Exception as exc:  # noqa: BLE001 - one bad message must not kill this agent for the rest of the run
             error = f"{cfg.name}: {str(exc) or type(exc).__name__}"
@@ -630,7 +759,7 @@ async def _agent_loop(ctx: RunContext, cfg: AgentCfg, queue: "asyncio.Queue[Enve
             logger.warning("ai_agent_failed", agent=cfg.name, error=error)
             await _record_error(ctx, cfg.name, error)
             await _publish_failure(ctx, cfg, env, error)
-            if cfg.name == "reporter":
+            if cfg.name == "reporter" and not ctx.capture_narrative:
                 await _reporter_fallback_report(ctx, error)
         finally:
             await ctx.bus.ack(env, cfg.name)
@@ -680,6 +809,10 @@ async def run_agent(databases: Databases, run_id: int) -> None:
                 max_run_minutes=float(a.get("max_run_minutes") or 0),
                 credential_id=a.get("credential_id"),
                 provider=a.get("provider", "ollama"),
+                fallback_provider=a.get("fallback_provider") or "",
+                fallback_base_url=a.get("fallback_base_url") or "",
+                fallback_model=a.get("fallback_model") or "",
+                fallback_credential_id=a.get("fallback_credential_id"),
             )
             for a in snapshot["agents"]
         }
@@ -694,6 +827,7 @@ async def run_agent(databases: Databases, run_id: int) -> None:
             custom_tools=custom_tools,
             guardrails=guardrails,
             task=asyncio.current_task(),
+            entry_agent=snapshot["entry_agent"],
             max_seconds=float(snapshot.get("max_run_seconds") or MAX_RUN_SECONDS),
             default_max_run_minutes=float(snapshot.get("default_max_run_minutes") or 0),
             llm_timeout_seconds=float(snapshot.get("llm_timeout_seconds") or LLM_TIMEOUT_SECONDS),
@@ -728,6 +862,8 @@ async def run_agent(databases: Databases, run_id: int) -> None:
             await asyncio.wait_for(bus.wait_idle(run_id), ctx.max_seconds)
         except TimeoutError:
             ctx.stop_reason = "time_limit"  # the budget ran out: stop automatically, keep what was found
+        if not dry_run and not ctx.stopped and ctx.entry_agent != "reporter":
+            await _write_run_reports(ctx)
         if ctx.errors and error is None:
             error = "; ".join(ctx.errors[:3])
     except LLMRequestError as exc:

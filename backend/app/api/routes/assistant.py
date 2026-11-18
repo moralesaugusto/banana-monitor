@@ -1,4 +1,8 @@
+import json
+from collections.abc import AsyncIterator
+
 from fastapi import APIRouter, HTTPException
+from fastapi.responses import StreamingResponse
 
 from app.api.deps import AppSession, CredentialServiceDep, CredentialsSession
 from app.api.schemas.ai_mode import VerifyResult
@@ -6,6 +10,8 @@ from app.api.schemas.assistant import (
     AssistantConfigRead,
     AssistantConfigUpdate,
     AssistantMessageRead,
+    AssistantToolInfo,
+    AssistantTools,
     ChatRequest,
     ChatResponse,
     ConnectionTest,
@@ -17,6 +23,7 @@ from app.domain.models import AssistantConfig, AssistantMessage
 from app.llm.client import LLMRequestError
 from app.llm.connection_check import check_connection
 from app.llm.service import AssistantService
+from app.llm.tools import TOOL_SCHEMAS, WRITE_TOOL_NAMES
 
 router = APIRouter(prefix="/assistant", tags=["assistant"])
 
@@ -24,6 +31,26 @@ router = APIRouter(prefix="/assistant", tags=["assistant"])
 @router.get("/config", response_model=AssistantConfigRead)
 async def get_config(session: AppSession) -> AssistantConfig:
     return await AssistantService(get_databases()).get_config(session)
+
+
+@router.get("/tools", response_model=AssistantTools)
+async def get_tools(session: AppSession) -> AssistantTools:
+    """Every tool the chat assistant may call, and whether it's actually usable right now given
+    AssistantConfig.full_access - the same WRITE_TOOL_NAMES allowlist dispatch_tool_call enforces
+    (llm/tools.py), so this can't drift from what the assistant can really do."""
+    config = await AssistantService(get_databases()).get_config(session)
+    return AssistantTools(
+        tools=[
+            AssistantToolInfo(
+                name=t["function"]["name"],
+                description=t["function"]["description"],
+                parameters=t["function"]["parameters"],
+                write=t["function"]["name"] in WRITE_TOOL_NAMES,
+                enabled=t["function"]["name"] not in WRITE_TOOL_NAMES or config.full_access,
+            )
+            for t in TOOL_SCHEMAS
+        ]
+    )
 
 
 @router.put("/config", response_model=AssistantConfigRead)
@@ -93,6 +120,27 @@ async def chat(
     except LLMRequestError as exc:
         raise HTTPException(status_code=502, detail=f"LLM request failed: {exc}") from exc
     return ChatResponse(reply=AssistantMessageRead.model_validate(reply))
+
+
+@router.post("/chat/stream")
+async def chat_stream(
+    payload: ChatRequest,
+    session: AppSession,
+    credentials_session: CredentialsSession,
+    credential_service: CredentialServiceDep,
+) -> StreamingResponse:
+    """SSE: `data: {"delta": "..."}` per content token of the turn's final answer, then one
+    `data: {"message": {...}}`, or one `data: {"error": "..."}` on an LLM failure. See
+    app.llm.service's module docstring for exactly what does and doesn't stream."""
+    service = AssistantService(get_databases())
+
+    async def events() -> AsyncIterator[str]:
+        async for event in service.send_chat_message_stream(
+            session, credentials_session, credential_service, payload.message
+        ):
+            yield f"data: {json.dumps(event)}\n\n"
+
+    return StreamingResponse(events(), media_type="text/event-stream")
 
 
 @router.get("/messages", response_model=list[AssistantMessageRead])

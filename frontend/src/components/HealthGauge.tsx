@@ -1,17 +1,30 @@
+const GAUGE_GRADIENTS = {
+  'health-gauge-green': ['#34d399', '#059669'],
+  'health-gauge-amber': ['#fbbf24', '#d97706'],
+  'health-gauge-red': ['#f87171', '#dc2626'],
+} as const
+
 /** A semicircle gauge for a 0-100 score, with the number in the middle. */
 export function HealthGauge({ score, label = 'Health score' }: { score: number; label?: string }) {
   const clamped = Math.max(0, Math.min(100, score))
   const radius = 80
   const length = Math.PI * radius
-  const color = clamped >= 75 ? '#10b981' : clamped >= 50 ? '#f59e0b' : '#ef4444'
+  const gradientId = clamped >= 75 ? 'health-gauge-green' : clamped >= 50 ? 'health-gauge-amber' : 'health-gauge-red'
+  const [from, to] = GAUGE_GRADIENTS[gradientId]
   return (
     <div className="flex flex-col items-center">
       <svg viewBox="0 0 200 120" className="w-56" role="img" aria-label={`${label}: ${clamped}`}>
+        <defs>
+          <linearGradient id={gradientId} x1="20" y1="100" x2="180" y2="100" gradientUnits="userSpaceOnUse">
+            <stop offset="0" stopColor={from} />
+            <stop offset="1" stopColor={to} />
+          </linearGradient>
+        </defs>
         <path d="M20 100a80 80 0 0 1 160 0" fill="none" stroke="var(--line)" strokeWidth="12" strokeLinecap="round" />
         <path
           d="M20 100a80 80 0 0 1 160 0"
           fill="none"
-          stroke={color}
+          stroke={`url(#${gradientId})`}
           strokeWidth="12"
           strokeLinecap="round"
           strokeDasharray={`${(clamped / 100) * length} ${length}`}

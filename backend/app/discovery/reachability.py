@@ -12,11 +12,13 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
+from app.alerting.engine import get_alert_engine
 from app.db.session import Databases
 from app.discovery.techniques.icmp import ping_host
 from app.discovery.techniques.tcp_ports import scan_ports
-from app.domain.enums import DeviceType, HealthStatus
+from app.domain.enums import DeviceType, EntityType, HealthStatus
 from app.domain.models import Device, Integration, IntegrationTarget, utcnow
+from app.metrics.writer import get_metrics_writer
 
 REACHABILITY_INTERVAL_SECONDS = 60.0
 _UNPOLLED_TYPES = {DeviceType.OTHER, DeviceType.WINDOWS, DeviceType.NETWORK_EQUIPMENT}
@@ -88,6 +90,8 @@ async def run_reachability(databases: Databases) -> None:
 
     results = await asyncio.gather(*(probe_device(ip, ports) for ip, ports in targets.values()))  # type: ignore[arg-type]
 
+    checked: list[int] = []
+    writer = get_metrics_writer()
     async with databases.app_session_factory() as session:
         for device_id, status in zip(targets, results, strict=True):
             device = await session.get(Device, device_id)
@@ -96,4 +100,17 @@ async def run_reachability(databases: Databases) -> None:
             device.status = status
             if status is not HealthStatus.DOWN:
                 device.last_seen_at = utcnow()
+            # DEVICE_DOWN rules read check history, not Device.status.
+            writer.enqueue_check_result(
+                entity_type=EntityType.DEVICE,
+                entity_id=device_id,
+                success=status is not HealthStatus.DOWN,
+                latency_ms=None,
+                error_message=None if status is not HealthStatus.DOWN else "unreachable",
+            )
+            checked.append(device_id)
         await session.commit()
+
+    engine = get_alert_engine()
+    for device_id in checked:
+        await engine.evaluate_entity(EntityType.DEVICE, device_id)

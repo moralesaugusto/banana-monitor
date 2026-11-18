@@ -1,9 +1,11 @@
 import { QueryClientProvider } from '@tanstack/react-query'
 import { render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
+import { http, HttpResponse } from 'msw'
 import { MemoryRouter, Route, Routes, useLocation } from 'react-router-dom'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { queryClient } from '../../lib/queryClient'
+import { server } from '../../test/mswServer'
 import { AgentsPage } from './AgentsPage'
 import { agent, agentsApi } from './fixtures'
 
@@ -67,6 +69,23 @@ describe('AgentsPage', () => {
     // Who reads its results is worked out from the other agents' subscriptions.
     const readers = screen.getByText('Results go to').nextElementSibling as HTMLElement
     expect(within(readers).getByText('reporter')).toBeInTheDocument()
+  })
+
+  it("shows an agent's own saved reports, filtered from everyone else's", async () => {
+    agentsApi([bellaco, reporter, quiet])
+    server.use(
+      http.get('/api/reports', () =>
+        HttpResponse.json([
+          { id: 2, title: 'Bellaco health check', source: 'agent:bellaco', created_at: '2026-11-16T21:00:00Z' },
+          { id: 1, title: 'Weekly network report', source: 'agent:reporter', created_at: '2026-11-14T06:13:00Z' },
+        ]),
+      ),
+    )
+    renderAt('/ai/agents')
+
+    expect(await screen.findByText('Reports (1)')).toBeInTheDocument()
+    expect(screen.getByRole('link', { name: 'Bellaco health check' })).toHaveAttribute('href', '/reports?report=2')
+    expect(screen.queryByText('Weekly network report')).not.toBeInTheDocument()
   })
 
   it('selects an agent from the list and from the address', async () => {
@@ -165,5 +184,24 @@ describe('AgentsPage', () => {
 
     expect(await screen.findByText('ghost')).toBeInTheDocument()
     expect(screen.getByRole('link', { name: 'Back to the agents' })).toBeInTheDocument()
+  })
+
+  it('shows "no key needed" for an agent using the (Ollama) default', async () => {
+    agentsApi([agent(10, 'uses_default')]) // provider: '', credential_id: null (the fixture default)
+    renderAt('/ai/agents/uses_default')
+    expect(await screen.findByText("Ollama - no key needed (agents' default)")).toBeInTheDocument()
+  })
+
+  it('shows the agent\'s own key when it has one', async () => {
+    agentsApi([agent(11, 'own_key', { provider: 'openrouter', credential_id: 5 })])
+    renderAt('/ai/agents/own_key')
+    expect(await screen.findByText("OpenRouter - this agent's own key")).toBeInTheDocument()
+  })
+
+  it('warns when OpenRouter is selected but no key is configured anywhere', async () => {
+    agentsApi([agent(12, 'no_key', { provider: 'openrouter', credential_id: null })])
+    renderAt('/ai/agents/no_key')
+    const warning = await screen.findByText('OpenRouter - no key configured')
+    expect(warning).toHaveClass('text-amber-700')
   })
 })

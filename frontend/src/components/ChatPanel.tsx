@@ -1,7 +1,7 @@
 import { useState } from 'react'
 import Markdown from 'react-markdown'
 import { Link } from 'react-router-dom'
-import { useAssistantMessages, useClearAssistantMessages, useSendChatMessage } from '../api/assistant'
+import { useAssistantMessages, useClearAssistantMessages, useStreamChatMessage } from '../api/assistant'
 import { Badge } from './Badge'
 import { Card } from './Card'
 import { ChatIcon, CloseIcon, SettingsIcon } from './icons'
@@ -27,14 +27,14 @@ export function ChatPanel() {
   const [draft, setDraft] = useState('')
 
   const { data: messages, isLoading } = useAssistantMessages()
-  const sendMessage = useSendChatMessage()
+  const { send, streamingText, isPending, isError } = useStreamChatMessage()
   const clearMessages = useClearAssistantMessages()
 
   function handleSend() {
     const text = draft.trim()
-    if (!text || sendMessage.isPending) return
+    if (!text || isPending) return
     setDraft('')
-    sendMessage.mutate(text)
+    void send(text)
   }
 
   if (!open) {
@@ -100,8 +100,15 @@ export function ChatPanel() {
               )}
             </Card>
           ))}
-          {sendMessage.isPending && <p className="text-xs text-fg-muted">Thinking…</p>}
-          {sendMessage.isError && <p className="text-xs text-red-600">Failed to reach the assistant.</p>}
+          {isPending && !streamingText && <p className="text-xs text-fg-muted">Thinking…</p>}
+          {isPending && streamingText && (
+            <Card className="mr-6 px-3 py-2 text-sm">
+              <div className="prose-sm text-fg [&_p]:my-1 [&_ul]:my-1 [&_ul]:list-disc [&_ul]:pl-4">
+                <Markdown>{streamingText}</Markdown>
+              </div>
+            </Card>
+          )}
+          {isError && <p className="text-xs text-red-600">Failed to reach the assistant.</p>}
         </div>
       </div>
 
@@ -120,7 +127,7 @@ export function ChatPanel() {
             type="button"
             className="rounded-control bg-accent px-3 py-1.5 text-sm font-medium text-on-accent hover:brightness-95 disabled:opacity-50"
             onClick={handleSend}
-            disabled={sendMessage.isPending}
+            disabled={isPending}
           >
             Send
           </button>

@@ -6,51 +6,34 @@
  * Canvas/surface/border/foreground tokens are plain CSS custom properties so
  * they can hold different values in light vs. dark mode (Tailwind v4's
  * @theme values are static at build time); the @theme block below re-exposes
- * them as real Tailwind utilities (bg-canvas, text-fg, border-line, ...) so
- * components reference one small vocabulary instead of repeating
- * neutral-500/neutral-900/dark:neutral-* pairs everywhere.
+ * them as real Tailwind utilities (bg-canvas, text-fg, border-line, ...).
  *
- * spot (--accent-strong). Primary buttons fill with ripe and use --on-accent text. Accent is reserved for interactive/brand elements
- * (active nav, links, focus rings, primary buttons). Status semantics
- * (up/down/degraded, alert states, event severity) stay on the separate
+ * The look is monochrome: a near-white canvas, white cards with hairline
+ * borders, and black (white in dark mode) as the only accent, used for
+ * primary buttons, active states and focus. Status semantics (up/down/
+ * degraded, alert states, event severity) stay on the separate
  * red/amber/emerald/sky/purple scale in Badge.tsx - the accent never doubles
- * as a health color, in any theme.
+ * as a health color.
  *
- * Banana is the visual identity: a true-neutral canvas/surface (the same
- * gray scale either a plain light or dark UI would use - no colored tint),
- * carrying one saturated banana-yellow/mustard accent reserved for
- * interactive and brand elements. Distinct from the earlier "mango" pass,
- * which tinted canvas/surface/foreground orange-brown across the board; see
- * docs/decisions.md "Banana-yellow accent on a neutral surface" for why that
- * was reverted. Light/dark still follows prefers-color-scheme; the header
- * toggle can pin either theme.
- *
- * --accent-gradient is the one deliberately bold touch (the sidebar
- * wordmark badge and the active-nav indicator) - a banana-yellow sweep. It
- * is used in exactly those two places, nowhere else, so it reads as a
- * signature rather than decoration repeated on every surface.
+ * Light/dark follows prefers-color-scheme; the header toggle can pin either.
  */
 
 :root {
   color-scheme: light dark;
 
-  --canvas: #f6f7f9;
+  --canvas: #fafafa;
   --surface: #ffffff;
   --surface-raised: #ffffff;
-  --line: #e4e7eb;
-  --line-strong: #d3d8de;
-  --fg: #1b1f24;
-  --fg-muted: #596170;
-  --fg-subtle: #8a93a1;
-  --accent: #e0a800;
-  --accent-strong: #7a5200;
-  --accent-soft: rgba(224, 168, 0, 0.12);
-  --accent-soft-strong: rgba(224, 168, 0, 0.22);
-  --on-accent: #2b1d00;
-  --accent-gradient: linear-gradient(135deg, #ffe27a, #e0a800 55%, #7a5200);
-  --topbar-from: #ffd666;
-  --topbar-to: #e0a800;
-  --topbar-fg: #2b1d00;
+  --line: #ececec;
+  --line-strong: #dcdcdc;
+  --fg: #0a0a0a;
+  --fg-muted: #6b6b6b;
+  --fg-subtle: #9a9a9a;
+  --accent: #0a0a0a;
+  --accent-strong: #0a0a0a;
+  --accent-soft: rgba(10, 10, 10, 0.06);
+  --accent-soft-strong: rgba(10, 10, 10, 0.12);
+  --on-accent: #ffffff;
 }
 
 /* Dark follows the OS unless the user picked a theme (data-theme, set by the
@@ -58,45 +41,37 @@
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme='light']) {
     color-scheme: dark;
-    --canvas: #0f1115;
-    --surface: #171a21;
-    --surface-raised: #1d212a;
-    --line: #2b2f38;
-    --line-strong: #3a3f4a;
-    --fg: #eef1f5;
-    --fg-muted: #a8afba;
-    --fg-subtle: #747c88;
-    --accent: #f2c94c;
-    --accent-strong: #a37a12;
-    --accent-soft: rgba(242, 201, 76, 0.14);
-    --accent-soft-strong: rgba(242, 201, 76, 0.22);
-    --on-accent: #2b1d00;
-    --accent-gradient: linear-gradient(135deg, #ffe27a, #f2c94c 55%, #a37a12);
-    --topbar-from: #8a6700;
-    --topbar-to: #5c4300;
-    --topbar-fg: #fff3cf;
+    --canvas: #0b0b0c;
+    --surface: #141415;
+    --surface-raised: #1a1a1c;
+    --line: #26262a;
+    --line-strong: #35353a;
+    --fg: #f5f5f5;
+    --fg-muted: #a1a1a6;
+    --fg-subtle: #70707a;
+    --accent: #f5f5f5;
+    --accent-strong: #ffffff;
+    --accent-soft: rgba(245, 245, 245, 0.08);
+    --accent-soft-strong: rgba(245, 245, 245, 0.16);
+    --on-accent: #0a0a0a;
   }
 }
 
 :root[data-theme='dark'] {
   color-scheme: dark;
-  --canvas: #0f1115;
-  --surface: #171a21;
-  --surface-raised: #1d212a;
-  --line: #2b2f38;
-  --line-strong: #3a3f4a;
-  --fg: #eef1f5;
-  --fg-muted: #a8afba;
-  --fg-subtle: #747c88;
-  --accent: #f2c94c;
-  --accent-strong: #a37a12;
-  --accent-soft: rgba(242, 201, 76, 0.14);
-  --accent-soft-strong: rgba(242, 201, 76, 0.22);
-  --on-accent: #2b1d00;
-  --accent-gradient: linear-gradient(135deg, #ffe27a, #f2c94c 55%, #a37a12);
-  --topbar-from: #8a6700;
-  --topbar-to: #5c4300;
-  --topbar-fg: #fff3cf;
+  --canvas: #0b0b0c;
+  --surface: #141415;
+  --surface-raised: #1a1a1c;
+  --line: #26262a;
+  --line-strong: #35353a;
+  --fg: #f5f5f5;
+  --fg-muted: #a1a1a6;
+  --fg-subtle: #70707a;
+  --accent: #f5f5f5;
+  --accent-strong: #ffffff;
+  --accent-soft: rgba(245, 245, 245, 0.08);
+  --accent-soft-strong: rgba(245, 245, 245, 0.16);
+  --on-accent: #0a0a0a;
 }
 
 :root[data-theme='light'] {
@@ -123,10 +98,9 @@
   --color-accent-soft: var(--accent-soft);
   --color-accent-soft-strong: var(--accent-soft-strong);
   --color-on-accent: var(--on-accent);
-  --color-topbar-fg: var(--topbar-fg);
 
-  --radius-control: 0.625rem;
-  --radius-card: 0.875rem;
+  --radius-control: 0.75rem;
+  --radius-card: 1rem;
 }
 
 body {

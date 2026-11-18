@@ -7,10 +7,7 @@ import { ChangePasswordForm } from './ChangePasswordForm'
 function Centered({ children }: { children: ReactNode }) {
   return (
     <div className="flex min-h-screen flex-col bg-surface text-fg">
-      <header
-        className="flex h-14 shrink-0 items-center px-4 text-topbar-fg"
-        style={{ backgroundImage: 'linear-gradient(90deg, var(--topbar-from), var(--topbar-to))' }}
-      >
+      <header className="flex h-14 shrink-0 items-center border-b border-line px-4">
         <BananaLogo />
         <span className="ml-1.5 text-[15px] font-semibold tracking-tight">Banana</span>
       </header>

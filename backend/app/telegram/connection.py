@@ -12,6 +12,7 @@ class Connection:
     chat_ids: list[int]
     notify_alerts: bool
     notify_ai_reports: bool
+    notify_cost_budget: bool
     last_update_id: int
 
 
@@ -26,6 +27,7 @@ async def load_connection(databases: Databases) -> Connection | None:
         chat_ids = list(config.chat_ids)
         notify_alerts, last_update_id = config.notify_alerts, config.last_update_id
         notify_ai_reports = config.notify_ai_reports
+        notify_cost_budget = config.notify_cost_budget
     async with databases.credentials_session_factory() as session:
         try:
             secret = await CredentialService(get_secret_box()).get_decrypted(session, credential_id)
@@ -33,7 +35,7 @@ async def load_connection(databases: Databases) -> Connection | None:
             return None
     token = secret.get("token")
     return (
-        Connection(str(token), chat_ids, notify_alerts, notify_ai_reports, last_update_id)
+        Connection(str(token), chat_ids, notify_alerts, notify_ai_reports, notify_cost_budget, last_update_id)
         if token
         else None
     )

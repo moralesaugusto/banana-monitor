@@ -28,7 +28,7 @@ describe('ChatPanel', () => {
     const messages: AssistantMessage[] = []
     server.use(
       http.get('/api/assistant/messages', () => HttpResponse.json(messages)),
-      http.post('/api/assistant/chat', async ({ request }) => {
+      http.post('/api/assistant/chat/stream', async ({ request }) => {
         const body = (await request.json()) as { message: string }
         const reply: AssistantMessage = {
           id: 1,
@@ -41,7 +41,9 @@ describe('ChatPanel', () => {
           { id: 0, ts: new Date().toISOString(), role: 'user', content: body.message, tool_calls: null },
           reply,
         )
-        return HttpResponse.json({ reply })
+        const events = [{ delta: 'You have ' }, { delta: '**1** device.' }, { message: reply }]
+        const sse = events.map((e) => `data: ${JSON.stringify(e)}\n\n`).join('')
+        return new HttpResponse(sse, { headers: { 'Content-Type': 'text/event-stream' } })
       }),
     )
 
@@ -57,6 +59,33 @@ describe('ChatPanel', () => {
 
     expect(await screen.findByText(/You have/)).toBeInTheDocument()
     expect(screen.getByText(/list_devices/)).toBeInTheDocument()
+  })
+
+  it('shows the reply growing live as deltas arrive, before the turn is persisted', async () => {
+    server.use(
+      http.get('/api/assistant/messages', () => HttpResponse.json([])),
+      http.post('/api/assistant/chat/stream', () => {
+        const encoder = new TextEncoder()
+        // A stream that never closes: simulates a still-in-flight turn, so the test can observe
+        // the live partial state without racing its own completion/cleanup.
+        const stream = new ReadableStream({
+          start(controller) {
+            for (const event of [{ delta: 'Hel' }, { delta: 'lo!' }]) {
+              controller.enqueue(encoder.encode(`data: ${JSON.stringify(event)}\n\n`))
+            }
+          },
+        })
+        return new HttpResponse(stream, { headers: { 'Content-Type': 'text/event-stream' } })
+      }),
+    )
+
+    const user = userEvent.setup()
+    renderPanel()
+    await user.click(screen.getByTitle('Open assistant'))
+    await user.type(screen.getByPlaceholderText('Ask the assistant…'), 'hi')
+    await user.click(screen.getByRole('button', { name: 'Send' }))
+
+    expect(await screen.findByText('Hello!')).toBeInTheDocument()
   })
 
   it('clears the conversation', async () => {

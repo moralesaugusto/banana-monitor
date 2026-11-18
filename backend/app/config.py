@@ -38,6 +38,12 @@ class Settings(BaseSettings):
     ollama_base_url: str = "http://localhost:11434/v1"
     ollama_model: str = "qwen3:8b"
 
+    # Empty: Qdrant runs embedded, persisted under data_dir/qdrant - no server, no network call
+    # (QdrantClient(path=...)). Set to a URL (e.g. "http://192.168.1.50:6333") to point the same
+    # client at a real Qdrant server on the LAN instead - the only line that changes is which
+    # QdrantClient constructor argument is used (app.knowledge.qdrant_store.get_qdrant_client).
+    qdrant_url: str = ""
+
     https_enabled: bool = True
     cert_dir: Path = Path("certificates")
     # Optional overrides to bring your own cert instead of the auto-generated
@@ -62,6 +68,14 @@ class Settings(BaseSettings):
         return self.data_dir / "credentials.db"
 
     @property
+    def knowledge_db_path(self) -> Path:
+        return self.data_dir / "knowledge.db"
+
+    @property
+    def qdrant_local_path(self) -> Path:
+        return self.data_dir / "qdrant"
+
+    @property
     def app_db_url(self) -> str:
         return f"sqlite+aiosqlite:///{self.app_db_path}"
 
@@ -72,6 +86,10 @@ class Settings(BaseSettings):
     @property
     def credentials_db_url(self) -> str:
         return f"sqlite+aiosqlite:///{self.credentials_db_path}"
+
+    @property
+    def knowledge_db_url(self) -> str:
+        return f"sqlite+aiosqlite:///{self.knowledge_db_path}"
 
 
 @lru_cache

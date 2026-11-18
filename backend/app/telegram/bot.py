@@ -76,6 +76,24 @@ async def send_report_to_chats(databases: Databases, report_id: int) -> None:
             logger.warning("telegram_report_send_failed", chat_id=chat_id, error=str(exc))
 
 
+async def send_cost_budget_alert(databases: Databases, actual_usd: float, budget_usd: float) -> None:
+    """Pushes one text notification when AI Mode spend crosses the configured budget - alert-only,
+    never blocks a run. Gated by notify_cost_budget; the caller (app.llm.usage.check_cost_budget)
+    already ensures this runs at most once per crossing."""
+    connection = await load_connection(databases)
+    if connection is None or not connection.notify_cost_budget:
+        return
+    text = (
+        f"AI Mode spend has crossed its budget: ${actual_usd:.2f} actual vs a ${budget_usd:.2f} budget. "
+        "This is a notice only - no agent run was stopped."
+    )
+    for chat_id in connection.chat_ids:
+        try:
+            await client.send_message(connection.token, chat_id, text)
+        except client.TelegramError as exc:
+            logger.warning("telegram_cost_budget_alert_failed", chat_id=chat_id, error=str(exc))
+
+
 async def _status_text(databases: Databases) -> str:
     snapshot = await build_snapshot(databases)
     dc, sc = snapshot["device_counts"], snapshot["service_counts"]
@@ -184,3 +202,7 @@ async def poll_once(databases: Databases) -> None:
 
 def notify_report_saved(databases: Databases, report_id: int) -> None:
     spawn(send_report_to_chats(databases, report_id), f"telegram-report-{report_id}")
+
+
+def notify_cost_budget_exceeded(databases: Databases, actual_usd: float, budget_usd: float) -> None:
+    spawn(send_cost_budget_alert(databases, actual_usd, budget_usd), "telegram-cost-budget-alert")

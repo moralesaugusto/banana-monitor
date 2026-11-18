@@ -13,7 +13,7 @@ function base(props: IconProps) {
     viewBox: '0 0 20 20',
     fill: 'none',
     stroke: 'currentColor',
-    strokeWidth: 1.6,
+    strokeWidth: 1.5,
     strokeLinecap: 'round' as const,
     strokeLinejoin: 'round' as const,
     ...props,
@@ -343,6 +343,25 @@ export function LoopIcon(props: IconProps) {
       <path d="M12.5 2.5 15.5 5l-3 2.5" />
       <path d="M16 10.5V12a3 3 0 0 1-3 3H5" />
       <path d="M7.5 17.5 4.5 15l3-2.5" />
+    </svg>
+  )
+}
+
+export function KnowledgeIcon(props: IconProps) {
+  return (
+    <svg {...base(props)}>
+      <ellipse cx="10" cy="5" rx="6.5" ry="2.5" />
+      <path d="M3.5 5v10c0 1.4 2.9 2.5 6.5 2.5s6.5-1.1 6.5-2.5V5" />
+      <path d="M3.5 10c0 1.4 2.9 2.5 6.5 2.5s6.5-1.1 6.5-2.5" />
+    </svg>
+  )
+}
+
+export function EditIcon(props: IconProps) {
+  return (
+    <svg {...base(props)}>
+      <path d="M12.8 4.2l3 3L7.5 15.5l-3.7.7.7-3.7Z" />
+      <path d="M11.3 5.7l3 3" />
     </svg>
   )
 }
