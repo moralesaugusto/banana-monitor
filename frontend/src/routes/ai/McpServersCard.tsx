@@ -199,16 +199,18 @@ function ServerRow({ server }: { server: McpServer }) {
         <div className="flex flex-wrap items-center justify-between gap-2">
           <div className="min-w-0">
             <span className="font-medium">{server.name}</span>{' '}
-            <span className="font-mono text-xs text-fg-muted">{server.url}</span>
-            <button
-              type="button"
-              className="text-xs text-fg-muted hover:underline"
-              aria-expanded={open}
-              disabled={server.tool_count === 0}
-              onClick={() => setOpen(!open)}
-            >
-              {open ? 'Hide' : 'Show'} {server.tool_count} imported tool(s)
-            </button>
+            <span className="break-all font-mono text-xs text-fg-muted">{server.url}</span>
+            <div className="mt-3">
+              <button
+                type="button"
+                className="rounded-control border border-sky-500/50 bg-sky-500/10 px-2 py-1 text-xs font-medium text-sky-700 hover:bg-sky-500/20 disabled:border-line disabled:bg-transparent disabled:text-fg-muted dark:text-sky-300"
+                aria-expanded={open}
+                disabled={server.tool_count === 0}
+                onClick={() => setOpen(!open)}
+              >
+                {open ? 'Hide' : 'Show'} {server.tool_count} imported tool(s)
+              </button>
+            </div>
           </div>
           <div className="flex flex-wrap items-center gap-3">
             <label className="flex items-center gap-1 text-xs text-fg-muted">

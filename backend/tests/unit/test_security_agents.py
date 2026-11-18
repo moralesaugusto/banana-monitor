@@ -662,3 +662,15 @@ async def test_run_reports_backfill_adds_the_tool_and_keeps_edited_prompts(datab
     assert "record_finding" in agents["bellaco"].enabled_tools
     assert "record_finding" in agents["sinverguenza"].enabled_tools
     assert agents["sinverguenza"].system_prompt == "my own prompt"
+
+
+async def test_the_seeded_hexstrike_tools_are_listed_under_an_mcp_server(databases):
+    from app.domain.models import AiCustomTool, AiMcpServer
+
+    async with databases.app_session_factory() as session:
+        await ensure_default_agents(session)
+    async with databases.app_session_factory() as session:
+        servers = list(await session.scalars(select(AiMcpServer)))
+        tools = list(await session.scalars(select(AiCustomTool)))
+    assert [s.name for s in servers] == ["HexStrike"]
+    assert tools and all(t.mcp_server_id == servers[0].id for t in tools)

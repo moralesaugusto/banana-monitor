@@ -9,6 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.domain.models import (
     AiAgent,
     AiCustomTool,
+    AiMcpServer,
     AiModeSettings,
     AssistantConfig,
     DiscoverySettings,
@@ -322,6 +323,13 @@ async def _seed_tajonaso(session: AsyncSession) -> None:
     agent's enabled_tools is touched. A renamed or deleted tajonaso, or a tool an administrator already
     edited, is left alone on any later start, since this only ever runs the one time."""
     tools: list[dict[str, Any]] = json.loads(HEXSTRIKE_TOOLS_FILE.read_text())
+    # The tools belong to an MCP server like any imported ones, so they are listed under it on the Tools tab.
+    server = await session.scalar(select(AiMcpServer).where(AiMcpServer.url == HEXSTRIKE_MCP_URL))
+    name_taken = await session.scalar(select(AiMcpServer.id).where(AiMcpServer.name == "HexStrike"))
+    if server is None and name_taken is None:
+        server = AiMcpServer(name="HexStrike", url=HEXSTRIKE_MCP_URL)
+        session.add(server)
+        await session.flush()
     for spec in tools:
         existing = await session.scalar(select(AiCustomTool).where(AiCustomTool.name == spec["name"]))
         if existing is None:
@@ -331,6 +339,7 @@ async def _seed_tajonaso(session: AsyncSession) -> None:
                     description=spec["description"],
                     kind="mcp",
                     mcp_url=HEXSTRIKE_MCP_URL,
+                    mcp_server_id=server.id if server else None,
                     mcp_tool=spec["name"],
                     parameters=spec["parameters"],
                 )
